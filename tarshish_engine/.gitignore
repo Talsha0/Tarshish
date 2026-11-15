@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Runtime data
+*.db
+*.db-wal
+*.db-shm
+logs/
+output/*
+!output/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
