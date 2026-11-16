@@ -17,8 +17,9 @@ from core.interfaces import PluginContext
 from core.resilience import BudgetExceededError, BudgetGuard, NonRetryableError
 from plugins.generators.llm_text_gen import LLMTextGenerator
 
-pytest.importorskip("anthropic")
-pytest.importorskip("google.genai")
+# exc_type: a native dependency refused by the OS raises ImportError, not ModuleNotFoundError.
+pytest.importorskip("anthropic", exc_type=ImportError)
+pytest.importorskip("google.genai", exc_type=ImportError)
 
 CLAUDE_REPLY = {
     "id": "msg_test", "type": "message", "role": "assistant", "model": "claude-opus-5-5",

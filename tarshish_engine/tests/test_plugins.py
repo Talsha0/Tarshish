@@ -188,7 +188,7 @@ def fake_anthropic(text: str, stop_reason: str = "end_turn", model: str = "claud
 
 
 def paid_generator(make_settings, model: str, client, spend: float = 0.0) -> LLMTextGenerator:
-    pytest.importorskip("anthropic")
+    pytest.importorskip("anthropic", exc_type=ImportError)
     settings = make_settings(anthropic_api_key="sk-ant-test-0000000000000000")
     guard = BudgetGuard(lambda: spend, settings.max_monthly_ai_budget_usd)
     generator = LLMTextGenerator(PluginContext(settings=settings, llm_model=model, budget_guard=guard))

@@ -164,3 +164,55 @@ def test_delete_is_allowed_only_for_pipelines_without_history(dashboard, capsys)
     app.button(key="delete_sports_he").click().run()
     assert any("publication history" in error.value for error in app.error)
     assert db.get_pipeline("sports_he") is not None
+
+
+def test_social_pages_are_added_through_plain_widgets_and_raw_tokens_are_refused(dashboard):
+    app, db = dashboard
+    app.button(key="edit_sports_he").click().run()
+    app.number_input(key="f_rows_sports_he").set_value(3).run()  # one more row than the two existing pages
+
+    app.selectbox(key="f_pp_sports_he_2").set_value("telegram_pub")
+    app.text_input(key="f_pn_sports_he_2").set_value("@second_channel")
+    app.text_input(key="f_pt_sports_he_2").set_value("7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1")  # a real-looking token
+    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
+    assert any("NAME of an environment variable" in error.value for error in app.error)
+    assert len(json.loads(db.get_pipeline("sports_he")["social_pages_json"])) == 2  # nothing was stored
+
+    app.text_input(key="f_pt_sports_he_2").set_value("TG_SECOND_BOT_TOKEN")
+    app.text_input(key="f_pc_sports_he_2").set_value("TG_SECOND_CHAT_ID")
+    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
+
+    assert not app.exception and not app.error
+    pages = json.loads(db.get_pipeline("sports_he")["social_pages_json"])
+    assert pages[2] == {
+        "platform": "telegram_pub", "page_name": "@second_channel",
+        "token_env_var": "TG_SECOND_BOT_TOKEN", "chat_id_env_var": "TG_SECOND_CHAT_ID",
+    }
+
+    # Setting a row's platform to "— none —" removes that page.
+    app.selectbox(key="f_pp_sports_he_2").set_value("— none —")
+    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
+    assert not app.exception and len(json.loads(db.get_pipeline("sports_he")["social_pages_json"])) == 2
+
+
+def test_dashboard_does_not_need_pyarrow(dashboard, monkeypatch):
+    """Windows Smart App Control can refuse to load pyarrow; the dashboard must render without it."""
+    import builtins
+    import sys
+
+    app, _ = dashboard
+    for name in [module for module in sys.modules if module == "pyarrow" or module.startswith("pyarrow.")]:
+        monkeypatch.delitem(sys.modules, name)
+    real_import = builtins.__import__
+
+    def refuse_pyarrow(name, *args, **kwargs):
+        if name == "pyarrow" or name.startswith("pyarrow."):
+            raise ImportError("DLL load failed while importing lib: An Application Control policy has blocked this file.")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_pyarrow)
+    app.run()
+    app.button(key="run_sports_he").click().run()
+
+    assert not app.exception
+    assert any(metric.label == "Net profit (USD)" for metric in app.metric)

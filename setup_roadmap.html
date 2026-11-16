@@ -341,7 +341,8 @@ python --version</code></pre></div>
         <div class="step-body">
           <label class="step-title" for="cb-p1-install"><span class="step-num"></span> Install the dependencies</label>
           <p>This file includes the runtime packages plus <code>pytest</code> for the next step.</p>
-          <div class="cmd"><pre><code>pip install -r requirements-dev.txt</code></pre></div>
+          <div class="cmd"><pre><code>python -m pip install -r requirements-dev.txt</code></pre></div>
+          <p class="note">Written as <code>python -m pip</code> on purpose: on Windows 11 the plain <code>pip</code> command can be blocked (see "If something goes wrong" below).</p>
           <p class="done-when"><strong>Done when:</strong> pip finishes with "Successfully installed" and no red error lines.</p>
         </div>
       </li>
@@ -412,8 +413,8 @@ python main.py --stats</code></pre></div>
         <div class="step-body">
           <label class="step-title" for="cb-p1-dashboard"><span class="step-num"></span> Launch the dashboard</label>
           <p>Leave it running in its own terminal and open a second terminal for the remaining steps.</p>
-          <div class="cmd"><pre><code>streamlit run dashboard/app.py</code></pre></div>
-          <p class="note">If the <code>streamlit</code> command is not found, use <code>python -m streamlit run dashboard/app.py</code>.</p>
+          <div class="cmd"><pre><code>python -m streamlit run dashboard/app.py</code></pre></div>
+          <p class="note">The shorter <code>streamlit run dashboard/app.py</code> is the same command; the <code>python -m</code> form is the one Windows does not block.</p>
           <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> shows the
             <code>sports_he</code> flow card, the "Run Pipeline Now (Dry-Run)" button returns three captions, and
             the Queue &amp; Logs tab lists the post from the previous step.</p>
@@ -445,6 +446,15 @@ python main.py --mode worker</code></pre></div>
       <dl>
         <dt><code>[ENVIRONMENT ERROR]</code> or an <code>ImportError</code></dt>
         <dd>The environment does not match your Python. Repeat steps 1.2 and 1.3.</dd>
+        <dt>"An Application Control policy has blocked this file", or <code>pip</code> / <code>streamlit</code> ends in "Access is denied"</dt>
+        <dd>Windows 11 Smart App Control refused an unsigned file from a freshly installed package. It is a setting
+          of the computer, not a fault in the project, and it comes and goes. Use the <code>python -m …</code>
+          commands exactly as written here, wait a minute and retry, then repeat steps 1.2 and 1.3. If a library
+          keeps being blocked, the section "Windows Smart App Control" in <code>tarshish_engine/README.md</code>
+          lists the options.</dd>
+        <dt>The tests all pass but pytest ends with a <code>PermissionError</code></dt>
+        <dd>Make sure you run them from the <code>tarshish_engine</code> folder, where <code>pytest.ini</code>
+          keeps test files inside the project.</dd>
         <dt><code>[CONFIG ERROR]</code></dt>
         <dd>The message names the exact variable in <code>.env</code> or field in <code>pipelines.yaml</code> that is invalid. Fix it and rerun.</dd>
         <dt>The dry-run says <code>skipped 3</code> and shows no cards</dt>
@@ -616,7 +626,7 @@ WORKER_MAX_DELAY_SECONDS=2700</code></pre></div>
           <div class="cmd"><pre><code>git clone &lt;your-repo-url&gt; /opt/tarshish
 cd /opt/tarshish/tarshish_engine
 python3 -m venv --clear .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt
 chmod 600 .env</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> <code>.venv/bin/python main.py --stats</code> runs on the server.</p>
         </div>
@@ -675,7 +685,7 @@ schtasks /Create /TN "Tarshish worker" /SC ONLOGON /TR "\"C:\path\to\tarshish_en
           <label class="step-title" for="cb-p2-dashboard-access"><span class="step-num"></span> Reach the dashboard safely</label>
           <p><strong>The dashboard has no login.</strong> Anyone who can open it can edit pipelines and flush the queue,
             so never expose its port to the internet. Bind it to the server itself and connect through an SSH tunnel:</p>
-          <div class="cmd"><pre><code>.venv/bin/streamlit run dashboard/app.py --server.address 127.0.0.1 --server.headless true</code></pre></div>
+          <div class="cmd"><pre><code>.venv/bin/python -m streamlit run dashboard/app.py --server.address 127.0.0.1 --server.headless true</code></pre></div>
           <div class="cmd"><pre><code>ssh -L 8501:127.0.0.1:8501 you@your-server</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> on your own computer shows
             the server's dashboard, and the port is closed from outside.</p>
@@ -769,7 +779,7 @@ python main.py --retry-failed</code></pre></div>
   </section>
 
   <footer>
-    Written for the repository as it stood on 16 November 2026. Command reference and architecture notes:
+    Last revised 16 November 2026. Command reference and architecture notes:
     <code>tarshish_engine/README.md</code>.
   </footer>
 </div>

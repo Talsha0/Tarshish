@@ -10,7 +10,5 @@ tzdata>=2024.1; sys_platform == "win32"   # IANA timezones for the worker on Win
 anthropic>=2.8,<3
 google-genai>=3.0,<4
 
-# Admin & analytics dashboard
+# Admin & analytics dashboard (uses only basic widgets + HTML, so it does not need pyarrow to load)
 streamlit>=1.67,<2
-pandas>=2.2
-altair>=5.5

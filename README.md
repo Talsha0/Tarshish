@@ -12,7 +12,7 @@ Needs Python 3.14 or 3.15 (older 3.11+ versions should work but are untested).
 cd tarshish_engine
 python -m venv --clear .venv
 .venv\Scripts\activate            # Windows   (Linux/macOS: source .venv/bin/activate)
-pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 python -m pytest tests -q         # everything should pass
 python main.py --pipeline sports_he --mode immediate --dry-run
 ```
@@ -29,3 +29,7 @@ templates and prints the posts to the console.
 | [`.claude/`](.claude/CLAUDE.md) | Project knowledge for Claude Code. It loads automatically when you open the repo; `/verify` runs the checks. |
 
 Secrets go only in `tarshish_engine/.env` (git-ignored). Copy `.env.example` to create it.
+
+On Windows 11, Smart App Control can block freshly installed Python libraries. The commands above are
+written to avoid that (`python -m …`); if you still see "An Application Control policy has blocked this
+file", see *Windows Smart App Control* in [`tarshish_engine/README.md`](tarshish_engine/README.md).

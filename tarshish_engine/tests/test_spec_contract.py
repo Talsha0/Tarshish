@@ -271,7 +271,7 @@ def test_every_third_party_import_is_declared_in_requirements():
     distribution_for = {
         "pydantic": "pydantic", "pydantic_settings": "pydantic-settings", "ruamel": "ruamel.yaml",
         "dotenv": "python-dotenv", "httpx": "httpx", "anthropic": "anthropic", "google": "google-genai",
-        "streamlit": "streamlit", "pandas": "pandas", "altair": "altair", "pytest": "pytest",
+        "streamlit": "streamlit", "pytest": "pytest",
     }
     local = {"core", "plugins", "storage", "dashboard", "main", "tests", "conftest"}
     imported: set[str] = set()

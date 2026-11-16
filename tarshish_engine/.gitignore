@@ -14,3 +14,6 @@ output/*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# pytest temp files (see pytest.ini)
+.pytest_tmp/

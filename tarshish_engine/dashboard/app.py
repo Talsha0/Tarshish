@@ -2,7 +2,7 @@
 
 Run from the project root:
 
-    streamlit run dashboard/app.py
+    python -m streamlit run dashboard/app.py
 
 Tabs
 ----
@@ -12,6 +12,11 @@ Tabs
 
 The page talks to the same engine objects as the CLI (``core`` + ``MetricsService``),
 and pipelines are read from SQLite on every rerun, so edits apply immediately.
+
+Only Streamlit's basic widgets are used, with small HTML snippets for tables and bars.
+Streamlit's dataframe, data-editor and chart elements all load the native Apache Arrow
+library, which Windows Smart App Control can refuse to load; avoiding them keeps the
+dashboard working on locked-down machines.
 """
 
 from __future__ import annotations
@@ -22,19 +27,17 @@ import io
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:  # `streamlit run` puts dashboard/ on sys.path, not the project root
     sys.path.insert(0, str(ROOT))
 
-import altair as alt  # noqa: E402
-import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from core import Engine, bootstrap  # noqa: E402
-from core.config import PipelineConfig, describe_validation_error  # noqa: E402
+from core.config import PipelineConfig, SocialPage, describe_validation_error  # noqa: E402
 from core.resilience import ConfigError, TarshishError, redact  # noqa: E402
 from dashboard.metrics_service import MetricsService  # noqa: E402
 
@@ -42,12 +45,13 @@ TAB_PIPELINES, TAB_KPIS, TAB_QUEUE = "Pipelines", "KPIs & Budget", "Queue & Logs
 _TAB_SLUGS = {"pipelines": TAB_PIPELINES, "kpis": TAB_KPIS, "queue": TAB_QUEUE}
 NEW_PIPELINE = "➕ Create a new pipeline"
 SELECT_NEXT = "_select_pipeline"  # pipeline to show in the form on the next draw (see render_pipeline_form)
+NO_PLATFORM = "— none —"          # a social-page row with this platform is ignored / removed on save
 LANGUAGES = ["he", "en", "ar", "ru", "es", "fr", "de"]
 RTL_LANGUAGES = {"he", "ar", "fa", "ur"}
+_STANDARD_PAGE_KEYS = {"platform", "page_name", "token_env_var", "chat_id_env_var"}
 
 # One series hue for every bar (categories are nominal), plus reserved status colors.
 SERIES_BLUE = {"light": "#2a78d6", "dark": "#3987e5"}
-LABEL_INK = "#898781"  # value labels at the bar tips: one muted tone that is legible on light and dark surfaces
 STATUS = {
     "ok": {"color": None, "icon": "✅", "label": "Within budget"},
     "warning": {"color": "#fab219", "icon": "⚠️", "label": "Over 70% of the budget used"},
@@ -76,6 +80,26 @@ st.markdown(
       .tsh-meter-head { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
                         font-size: .9rem; margin-bottom: 6px; }
       .tsh-meter-value { font-size: 1.5rem; font-weight: 600; }
+
+      .tsh-table-wrap { overflow: auto; border: 1px solid rgba(128,128,128,.3); border-radius: 8px; margin: 4px 0 10px; }
+      .tsh-table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+      .tsh-table th { text-align: left; font-weight: 600; white-space: nowrap; padding: 8px 12px;
+                      background: rgba(128,128,128,.10); border-bottom: 1px solid rgba(128,128,128,.3); }
+      .tsh-table td { padding: 7px 12px; border-bottom: 1px solid rgba(128,128,128,.16); vertical-align: top;
+                      white-space: nowrap; }
+      .tsh-table tr:last-child td { border-bottom: 0; }
+      .tsh-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+      .tsh-table td.clip { max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+
+      .tsh-bars { margin: 2px 0 14px; }
+      .tsh-bars-title { font-weight: 600; margin-bottom: 8px; }
+      .tsh-bar-row { display: grid; grid-template-columns: minmax(70px, 34%) 1fr; align-items: center;
+                     column-gap: 10px; padding: 5px 0; }
+      .tsh-bar-name { font-size: .84rem; opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tsh-bar-area { display: flex; align-items: center; gap: 7px; min-width: 0;
+                      border-left: 1px solid rgba(128,128,128,.55); }
+      .tsh-bar-fill { height: 16px; min-width: 2px; border-radius: 0 4px 4px 0; }
+      .tsh-bar-value { font-size: .8rem; opacity: .78; font-variant-numeric: tabular-nums; white-space: nowrap; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -115,6 +139,10 @@ def money(value: float, digits: int = 2) -> str:
     return f"-${abs(value):,.{digits}f}" if value < 0 else f"${value:,.{digits}f}"
 
 
+def whole(value: float) -> str:
+    return f"{value:,.0f}"
+
+
 def local_time(engine: Engine, iso: str | None) -> str:
     if not iso:
         return ""
@@ -133,6 +161,37 @@ def show_flash() -> None:
     kind, message = st.session_state.pop("_flash", (None, None))
     if message:
         getattr(st, kind)(message)
+
+
+def html_table(
+    rows: list[dict[str, Any]],
+    columns: dict[str, str],
+    *,
+    formats: dict[str, Callable[[Any], str]] | None = None,
+    numeric: tuple[str, ...] = (),
+    clipped: tuple[str, ...] = (),
+) -> None:
+    """Render rows as a plain HTML table (every value escaped; long cells clipped with a hover title)."""
+    if not rows:
+        st.caption("Nothing here.")
+        return
+    formats = formats or {}
+    head = "".join(f'<th class="{"num" if key in numeric else ""}">{esc(label)}</th>' for key, label in columns.items())
+    body = []
+    for row in rows:
+        cells = []
+        for key in columns:
+            value = row.get(key)
+            text = "" if value is None else formats[key](value) if key in formats else str(value)
+            classes = " ".join(name for name, on in (("num", key in numeric), ("clip", key in clipped)) if on)
+            title = f' title="{esc(text)}" dir="auto"' if key in clipped else ""
+            cells.append(f'<td class="{classes}"{title}>{esc(text)}</td>')
+        body.append(f"<tr>{''.join(cells)}</tr>")
+    st.markdown(
+        f'<div class="tsh-table-wrap"><table class="tsh-table"><thead><tr>{head}</tr></thead>'
+        f'<tbody>{"".join(body)}</tbody></table></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -247,13 +306,35 @@ def render_pipeline_card(engine: Engine, pipeline: PipelineConfig) -> None:
         render_dry_run_result(pipeline)
 
 
-def _social_pages_frame(pipeline: PipelineConfig | None) -> pd.DataFrame:
-    columns = ["platform", "page_name", "token_env_var", "chat_id_env_var"]
-    rows = [
-        {column: getattr(page, column) for column in columns}
-        for page in (pipeline.social_pages if pipeline else [])
-    ] or [{"platform": "console_pub", "page_name": "default", "token_env_var": None, "chat_id_env_var": None}]
-    return pd.DataFrame(rows, columns=columns).astype("object")
+def social_page_inputs(existing: list[SocialPage], publishers: list[str], row_count: int, suffix: str) -> list[dict[str, Any]]:
+    """One row of plain widgets per target page. Returns the raw values of every row."""
+    rows: list[dict[str, Any]] = []
+    for index in range(row_count):
+        page = existing[index] if index < len(existing) else None
+        options = [NO_PLATFORM, *publishers]
+        if page and page.platform not in options:
+            options.append(page.platform)  # a plugin that is no longer installed: keep it visible
+        visibility = "visible" if index == 0 else "collapsed"
+        cols = st.columns([1.25, 1.25, 1.5, 1.5])
+        rows.append({
+            "platform": cols[0].selectbox(
+                "Platform (publisher plugin)", options, index=options.index(page.platform) if page else 0,
+                key=f"f_pp_{suffix}_{index}", label_visibility=visibility,
+            ),
+            "page_name": cols[1].text_input(
+                "Page / channel", value=page.page_name if page else "", placeholder="e.g. @my_channel",
+                key=f"f_pn_{suffix}_{index}", label_visibility=visibility,
+            ),
+            "token_env_var": cols[2].text_input(
+                "Token env var", value=(page.token_env_var or "") if page else "", placeholder="e.g. TG_SPORTS_BOT_TOKEN",
+                key=f"f_pt_{suffix}_{index}", label_visibility=visibility,
+            ),
+            "chat_id_env_var": cols[3].text_input(
+                "Chat / page ID env var", value=(page.chat_id_env_var or "") if page else "",
+                placeholder="e.g. TG_SPORTS_CHAT_ID", key=f"f_pc_{suffix}_{index}", label_visibility=visibility,
+            ),
+        })
+    return rows
 
 
 def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> None:
@@ -274,6 +355,13 @@ def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> Non
     if current and current.llm_model not in models:
         models.append(current.llm_model)
     languages = LANGUAGES + ([current.language] if current and current.language not in LANGUAGES else [])
+    existing_pages = list(current.social_pages) if current else [SocialPage(platform="console_pub")]
+
+    # Outside the form on purpose: changing it must redraw the form with more (or fewer) rows.
+    row_count = int(st.number_input(
+        "Number of target social pages", min_value=1, max_value=12, value=len(existing_pages), key=f"f_rows_{suffix}",
+        help="Raise it to add a page. To remove a page, set its platform to “— none —” and save.",
+    ))
 
     def index_of(options: list[str], value: str | None) -> int:
         return options.index(value) if value in options else 0
@@ -329,23 +417,12 @@ def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> Non
 
         st.markdown("**Target social pages**")
         st.caption(
-            "One row per page or channel. The last two columns hold the **names** of the `.env` variables that "
+            "One row per page or channel. The last two fields hold the **names** of the `.env` variables that "
             "contain the credentials — never the token itself. Leave them empty for publishers that need none "
             "(console) or to use the publisher's default variables."
         )
-        pages_frame = st.data_editor(
-            _social_pages_frame(current),
-            num_rows="dynamic",
-            width="stretch",
-            hide_index=True,
-            key=f"f_pages_{suffix}",
-            column_config={
-                "platform": st.column_config.SelectboxColumn("Platform (publisher plugin)", options=publishers, required=True),
-                "page_name": st.column_config.TextColumn("Page / channel", required=True),
-                "token_env_var": st.column_config.TextColumn("Token env var", help="e.g. TG_SPORTS_BOT_TOKEN"),
-                "chat_id_env_var": st.column_config.TextColumn("Chat / page ID env var", help="e.g. TG_SPORTS_CHAT_ID"),
-            },
-        )
+        page_rows = social_page_inputs(existing_pages, publishers, row_count, suffix)
+
         prompt_template = st.text_area(
             "Custom prompt template (optional)", value=(current.prompt_template or "") if current else "",
             height=110, key=f"f_prompt_{suffix}",
@@ -371,7 +448,8 @@ def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> Non
                 "prompt_template": prompt_template.strip() or None,
                 "options": dict(current.options) if current else {},
             },
-            pages_frame,
+            page_rows,
+            existing_pages if current else [],
         )
 
     if current is not None:
@@ -387,16 +465,31 @@ def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> Non
                     st.error(str(exc))
 
 
-def save_pipeline(engine: Engine, current: PipelineConfig | None, payload: dict[str, Any], pages: pd.DataFrame) -> None:
-    # Keep publisher-specific extras (e.g. parse_mode) of pages that were not renamed.
-    extras = {page.key: page.options() for page in (current.social_pages if current else [])}
+def save_pipeline(
+    engine: Engine,
+    current: PipelineConfig | None,
+    payload: dict[str, Any],
+    page_rows: list[dict[str, Any]],
+    existing_pages: list[SocialPage],
+) -> None:
     social_pages = []
-    for record in pages.to_dict(orient="records"):
-        row = {key: (None if pd.isna(value) else str(value).strip() or None) for key, value in record.items()}
-        if not row.get("platform"):
+    for index, row in enumerate(page_rows):
+        platform = (row.get("platform") or "").strip()
+        if not platform or platform == NO_PLATFORM:
             continue
-        row["page_name"] = row.get("page_name") or "default"
-        social_pages.append({**extras.get((row["platform"], row["page_name"]), {}), **row})
+        page: dict[str, Any] = {}
+        # A row that still points at the same platform keeps that page's extra keys
+        # (publisher options such as parse_mode, or additional <name>_env_var references).
+        if index < len(existing_pages) and existing_pages[index].platform == platform:
+            stored = existing_pages[index].model_dump(exclude_none=True)
+            page.update({key: value for key, value in stored.items() if key not in _STANDARD_PAGE_KEYS})
+        page["platform"] = platform
+        page["page_name"] = (row.get("page_name") or "").strip() or "default"
+        for key in ("token_env_var", "chat_id_env_var"):
+            value = (row.get(key) or "").strip()
+            if value:
+                page[key] = value
+        social_pages.append(page)
     payload["social_pages"] = social_pages
 
     if current is None and engine.db.get_pipeline(payload["id"]) is not None:
@@ -455,35 +548,30 @@ def budget_meter(budget: dict[str, Any]) -> None:
 
 
 def ranked_bars(
-    rows: list[dict[str, Any]], category: str, label: str, measure: str, title: str, number_format: str,
-    *, whole_numbers: bool = False,
+    rows: list[dict[str, Any]], category: str, measure: str, title: str, fmt: Callable[[float], str]
 ) -> None:
-    """Horizontal bars, largest first, one hue — or a note when there is nothing to plot."""
-    frame = pd.DataFrame(rows)[[category, measure]]
-    if frame.empty or float(frame[measure].abs().sum()) == 0:
-        st.markdown(f"**{title}**")
+    """Horizontal bars, largest first, one hue, value at the tip — or a note when there is nothing to plot."""
+    values = sorted(((str(row[category]), float(row.get(measure) or 0)) for row in rows), key=lambda item: -item[1])
+    top = max((value for _, value in values), default=0.0)
+    if top <= 0:
+        st.markdown(f'<div class="tsh-bars"><div class="tsh-bars-title">{esc(title)}</div></div>', unsafe_allow_html=True)
         st.caption("No data yet.")
         return
-    top = float(frame[measure].max())
-    low = min(float(frame[measure].min()), 0.0)
-    base = alt.Chart(frame).encode(
-        y=alt.Y(f"{category}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=170)),
-        x=alt.X(
-            f"{measure}:Q", title=None,
-            axis=alt.Axis(format=number_format, tickCount=4, **({"tickMinStep": 1} if whole_numbers else {})),
-            scale=alt.Scale(domain=[low * 1.2, max(top, 0.0) * 1.2 or 1.0]),  # headroom for the value label
-        ),
-        tooltip=[alt.Tooltip(f"{category}:N", title=label),
-                 alt.Tooltip(f"{measure}:Q", title=title, format=number_format)],
-    )
-    bars = base.mark_bar(size=18, cornerRadiusEnd=4, color=SERIES_BLUE[theme_mode()])
-    labels = base.mark_text(align="left", baseline="middle", dx=6, color=LABEL_INK).encode(
-        text=alt.Text(f"{measure}:Q", format=number_format)
-    )
-    # Streamlit fits the whole chart into this height, so it must cover the title and the
-    # x-axis band as well as one row per bar; otherwise the bars are squeezed on top of each other.
-    chart = (bars + labels).properties(title=title, height=34 * len(frame) + 96)
-    st.altair_chart(chart, width="stretch")
+    color = SERIES_BLUE[theme_mode()]
+    parts = [f'<div class="tsh-bars" role="img" aria-label="{esc(title)}"><div class="tsh-bars-title">{esc(title)}</div>']
+    for name, value in values:
+        share = max(value, 0.0) / top
+        label = fmt(value)
+        parts.append(
+            f'<div class="tsh-bar-row" title="{esc(name)}: {esc(label)}">'
+            f'<span class="tsh-bar-name">{esc(name)}</span>'
+            f'<span class="tsh-bar-area">'
+            # The bar scales inside the row minus the room reserved for its value label.
+            f'<span class="tsh-bar-fill" style="width: calc((100% - 5.5em) * {share:.4f}); background: {color};"></span>'
+            f'<span class="tsh-bar-value">{esc(label)}</span></span></div>'
+        )
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 def breakdown(title: str, rows: list[dict[str, Any]], category: str, label: str, note: str) -> None:
@@ -493,27 +581,25 @@ def breakdown(title: str, rows: list[dict[str, Any]], category: str, label: str,
         return
     charts = st.columns(3)
     with charts[0]:
-        ranked_bars(rows, category, label, "published", "Published posts", ",.0f", whole_numbers=True)
+        ranked_bars(rows, category, "published", "Published posts", whole)
     with charts[1]:
-        ranked_bars(rows, category, label, "clicks", "Clicks", ",.0f", whole_numbers=True)
+        ranked_bars(rows, category, "clicks", "Clicks", whole)
     with charts[2]:
-        ranked_bars(rows, category, label, "revenue_usd", "Revenue (USD)", "$,.2f")
-    columns = [category, "published", "queued", "failed", "views", "clicks", "conversions",
-               "revenue_usd", "ai_spend_usd", "net_profit_usd"]
-    st.dataframe(
-        pd.DataFrame(rows)[columns],
-        hide_index=True,
-        width="stretch",
-        column_config={
-            category: st.column_config.TextColumn(label),
-            "published": "Published", "queued": "Queued", "failed": "Failed",
-            "views": st.column_config.NumberColumn("Views", format="localized"),
-            "clicks": st.column_config.NumberColumn("Clicks", format="localized"),
-            "conversions": st.column_config.NumberColumn("Conversions", format="localized"),
-            "revenue_usd": st.column_config.NumberColumn("Revenue", format="$%.2f"),
-            "ai_spend_usd": st.column_config.NumberColumn("AI spend", format="$%.4f"),
-            "net_profit_usd": st.column_config.NumberColumn("Net profit", format="$%.2f"),
+        ranked_bars(rows, category, "revenue_usd", "Revenue (USD)", money)
+    html_table(
+        rows,
+        {
+            category: label, "published": "Published", "queued": "Queued", "failed": "Failed", "views": "Views",
+            "clicks": "Clicks", "conversions": "Conversions", "revenue_usd": "Revenue", "ai_spend_usd": "AI spend",
+            "net_profit_usd": "Net profit",
         },
+        formats={
+            "published": whole, "queued": whole, "failed": whole, "views": whole, "clicks": whole,
+            "conversions": whole, "revenue_usd": money, "ai_spend_usd": lambda value: money(value, 4),
+            "net_profit_usd": money,
+        },
+        numeric=("published", "queued", "failed", "views", "clicks", "conversions", "revenue_usd", "ai_spend_usd",
+                 "net_profit_usd"),
     )
     st.caption(note)
 
@@ -590,14 +676,17 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
 # Tab 3 — queue & logs
 # --------------------------------------------------------------------------- #
 def publications_table(engine: Engine, rows: list[dict[str, Any]], columns: dict[str, str]) -> None:
-    if not rows:
-        st.caption("Nothing here.")
-        return
-    frame = pd.DataFrame(rows)
-    for column in ("scheduled_for", "published_at", "created_at"):
-        if column in frame:
-            frame[column] = frame[column].map(lambda value: local_time(engine, value))
-    st.dataframe(frame[list(columns)].rename(columns=columns), hide_index=True, width="stretch")
+    as_local_time = lambda value: local_time(engine, value)  # noqa: E731
+    html_table(
+        rows,
+        columns,
+        formats={
+            "scheduled_for": as_local_time, "published_at": as_local_time, "created_at": as_local_time,
+            "generation_cost_usd": lambda value: money(value, 4),
+        },
+        numeric=("id", "attempts", "generation_cost_usd"),
+        clipped=("product_title", "caption", "error_message"),
+    )
 
 
 def read_log_tail(path: Path, lines: int) -> str:

@@ -14,7 +14,7 @@ Every dependency installs from a prebuilt or pure-Python wheel, so no compiler i
 ```bash
 python -m venv --clear .venv
 .venv\Scripts\activate            # Windows  (Linux/macOS: source .venv/bin/activate)
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 copy .env.example .env            # optional: everything works offline without keys
 
 python main.py --pipeline sports_he --mode immediate --dry-run
@@ -52,6 +52,7 @@ Omit `--pipeline` to run every enabled pipeline. Exit codes: `0` ok, `1` failure
 
 ```bash
 streamlit run dashboard/app.py
+python -m streamlit run dashboard/app.py     # same thing; prefer this form on Windows
 ```
 
 1. **Pipelines** — flow cards (`source ➔ generator + LLM model ➔ social pages`), create/edit form,
@@ -61,8 +62,8 @@ streamlit run dashboard/app.py
 3. **Queue & Logs** — queued / published / failed items, retry, flush, redacted log tail.
 
 Deep links: `?tab=kpis`, `?tab=queue`. Restart the dashboard after editing `.env`.
-If the `streamlit` command is blocked or not found, `python -m streamlit run dashboard/app.py` does the same.
-The dashboard has no login: keep it on `localhost` or behind a tunnel.
+The dashboard has no login: keep it on `localhost` or behind a tunnel. It uses only Streamlit's basic
+widgets plus HTML for tables and bars, so it does not need `pyarrow` to load.
 
 ## Configuration
 
@@ -131,11 +132,12 @@ SQLite (`tarshish_engine.db`) in WAL mode. Tables: `pipelines`, `products`, `pub
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-The suite needs no network, API keys or `.env`. Every test gets its own temporary database.
+The suite needs no network, API keys or `.env`. Every test gets its own temporary database, kept under
+`.pytest_tmp/` inside the project (see `pytest.ini`) rather than in the shared system temp folder.
 
 | File | Covers |
 |---|---|
@@ -144,4 +146,33 @@ The suite needs no network, API keys or `.env`. Every test gets its own temporar
 | `test_plugins.py` | Mock source, post formatting, Telegram (mocked transport), LLM request building and parsing |
 | `test_llm_sdk_integration.py` | The real Anthropic and Gemini SDK clients against a local stand-in server |
 | `test_config.py`, `test_resilience.py` | Startup validation, secret rejection, redaction, retries, budget guard |
-| `test_dashboard.py` | The Streamlit app renders every tab and runs a dry-run |
+| `test_dashboard.py` | The Streamlit app end to end: every tab, dry-run, the pipeline form, enable toggle, queue actions, and rendering without `pyarrow` |
+
+## Windows Smart App Control
+
+**Symptoms.** `ImportError: DLL load failed while importing …: An Application Control policy has blocked
+this file`, a `pip` / `streamlit` / `pytest` command that ends in "Access is denied" or "Permission denied",
+or `[ENVIRONMENT ERROR] Windows blocked a library this program needs`.
+
+**Cause.** On Windows 11 with Smart App Control switched on, Windows refuses to load files that are unsigned
+and not yet known to Microsoft's reputation service. Python packages ship unsigned native libraries and pip
+generates unsigned launchers, so a fresh install can be blocked. The verdict is not stable: the same package
+can load in one environment and be blocked in the next.
+
+**What the project does about it.**
+
+* Every documented command uses `python -m …` (`python.exe` is signed) instead of the generated
+  `pip.exe`, `streamlit.exe` and `pytest.exe` launchers.
+* The dashboard avoids Streamlit's dataframe, data-editor and chart elements, so it does not need `pyarrow`,
+  the library blocked most often.
+* If an LLM SDK cannot be imported, the generator says so and falls back to the offline templates.
+
+**If a library the engine cannot do without is blocked** (for example `pydantic_core`):
+
+1. Try again a little later, then rebuild the environment (`python -m venv --clear .venv` and reinstall).
+2. See exactly which file was refused: Event Viewer → Applications and Services Logs → Microsoft → Windows →
+   CodeIntegrity → Operational, event 3077.
+3. Develop inside WSL 2 or a Linux container, where Smart App Control does not apply.
+4. Turning Smart App Control off (Windows Security → App & browser control → Smart App Control) removes the
+   problem. On many Windows versions it cannot be switched back on without resetting the PC, so read the
+   notice on that settings page and decide deliberately.

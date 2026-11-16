@@ -33,7 +33,20 @@ or moving the project folder. Rebuild it from the project folder:
 
     python -m venv --clear .venv
     .venv\\Scripts\\activate          (Linux/macOS: source .venv/bin/activate)
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
+"""
+
+_APP_CONTROL_HELP = """
+[ENVIRONMENT ERROR] Windows blocked a library this program needs: {error}
+
+This is Windows Smart App Control (or another application-control policy) refusing
+to load an unsigned file from a freshly installed Python package. It is a setting
+of this computer, not a fault in the project, and it can come and go between runs.
+
+  1. Try again in a minute, then rebuild the environment (README, "Quick start").
+  2. Always use the "python -m ..." commands from the README; the generated
+     pip.exe / streamlit.exe launchers are blocked more often than python.exe.
+  3. If it keeps happening, see "Windows Smart App Control" in the README.
 """
 
 
@@ -213,7 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         engine = bootstrap(log_level=args.log_level)
     except ImportError as exc:
         # Missing packages, or a virtualenv whose compiled packages belong to another Python.
-        print(_ENVIRONMENT_HELP.format(error=exc, version=sys.version.split()[0]), file=sys.stderr)
+        template = _APP_CONTROL_HELP if "Application Control" in str(exc) else _ENVIRONMENT_HELP
+        print(template.format(error=exc, version=sys.version.split()[0]), file=sys.stderr)
         return EXIT_CONFIG
     except ConfigError as exc:
         # Startup validation failed: say exactly what is wrong and stop.
