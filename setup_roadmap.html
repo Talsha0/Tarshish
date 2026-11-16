@@ -264,10 +264,11 @@
       <h3>✅ Working and tested</h3>
       <ul>
         <li>Engine core, CLI and SQLite store</li>
-        <li>Mock product source (3 products)</li>
+        <li>Two mock product sources (14 products, AliExpress and Temu)</li>
         <li>Offline Hebrew / English captions</li>
         <li>Console publisher, queue and worker</li>
-        <li>Streamlit dashboard</li>
+        <li>Streamlit dashboard, with live storefront clicks</li>
+        <li>FindHub storefront: FastAPI backend, typo-tolerant search, Next.js site in Hebrew and English</li>
       </ul>
     </div>
     <div class="card">
@@ -301,8 +302,9 @@
     <div class="phase-head">
       <div class="kicker">Phase 1</div>
       <h2>Getting the PoC Running</h2>
-      <p class="phase-intro">Everything here runs offline: no API keys, no accounts, no cost. Allow about twenty minutes,
-        most of it waiting for packages to install.</p>
+      <p class="phase-intro">Everything here runs on your own machine: no API keys, no accounts, no cost. Allow about
+        half an hour, most of it waiting for packages to install. The last four steps bring up the FindHub storefront
+        and need <a href="https://nodejs.org/">Node.js</a> 20.9 or newer.</p>
       <div class="phase-progress">
         <div class="meter" data-meter="1"><span></span></div>
         <span class="count" data-count="1">0 of 0</span>
@@ -441,6 +443,75 @@ python main.py --mode worker</code></pre></div>
       </li>
     </ol>
 
+    <h3 class="group">FindHub storefront</h3>
+    <p class="phase-intro">The public deal site. It is the third layer of the system, and all three read and write the
+      same <code>tarshish_engine.db</code>:</p>
+    <div class="cmd"><pre><code># 1. Pipeline engine: fetches products, writes posts          (any terminal, on demand)
+python main.py --pipeline sports_he --mode immediate --dry-run
+
+# 2. Storefront backend: products, search, click tracking     (terminal A, leave running)
+python -m uvicorn api.server:app --reload --port 8000
+
+# 3. Storefront website: what shoppers see                    (terminal B, leave running)
+cd storefront
+npm install
+npm run dev</code></pre></div>
+    <ol class="steps">
+      <li class="step" data-step="p1-store-seed">
+        <input class="step-check" type="checkbox" id="cb-p1-store-seed">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-store-seed"><span class="step-num"></span> Load the demo catalogue</label>
+          <p>Fourteen realistic products across three categories (sports, gadgets, home) and two stores, with discounts,
+            coupons and flash deals. Safe to repeat: it updates the same rows.</p>
+          <div class="cmd"><pre><code>python main.py --seed-storefront</code></pre></div>
+          <p class="note">The first start after this update also upgrades an existing database in place: the log lists
+            the columns it added to <code>products</code>. Nothing is deleted.</p>
+          <p class="done-when"><strong>Done when:</strong> it prints <code>Seeded 14 demo product(s)</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-store-api">
+        <input class="step-check" type="checkbox" id="cb-p1-store-api">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-store-api"><span class="step-num"></span> Start the storefront backend</label>
+          <p>A FastAPI service over the same database. Leave it running in its own terminal, with the virtual
+            environment active.</p>
+          <div class="cmd"><pre><code>python -m uvicorn api.server:app --reload --port 8000</code></pre></div>
+          <p class="note">The shorter <code>uvicorn api.server:app --reload --port 8000</code> is the same command;
+            the <code>python -m</code> form is the one Windows does not block.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8000/api/health</code> answers
+            <code>"products": 14</code>, and <code>http://localhost:8000/api/docs</code> lists the endpoints.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-store-web">
+        <input class="step-check" type="checkbox" id="cb-p1-store-web">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-store-web"><span class="step-num"></span> Start the storefront website</label>
+          <p>In a third terminal. The first <code>npm install</code> downloads the packages and takes a minute or two.</p>
+          <div class="cmd"><pre><code>cd storefront
+npm install
+npm run dev</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:3000</code> opens the Hebrew storefront
+            (right to left, prices in ₪) with fourteen deals, the EN switch shows the same page left to right,
+            <code>http://localhost:3000/he/c/sports</code> shows the sports collection, and
+            <code>http://localhost:3000/he/p/1</code> opens straight into a product's Quick View.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-store-click">
+        <input class="step-check" type="checkbox" id="cb-p1-store-click">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-store-click"><span class="step-num"></span> Follow one click end to end</label>
+          <p>On the storefront open a deal, copy its coupon, press the green button and then "Continue to Store". The
+            store address is a placeholder in the demo catalogue, so the new tab will not load a real product; the
+            click is recorded all the same.</p>
+          <p class="done-when"><strong>Done when:</strong> the dashboard's KPIs &amp; Budget tab shows the click under
+            "Storefront click-throughs", by category and by source (press "Refresh clicks").</p>
+        </div>
+      </li>
+    </ol>
+
     <div class="help">
       <h3>If something goes wrong in Phase 1</h3>
       <dl>
@@ -459,6 +530,13 @@ python main.py --mode worker</code></pre></div>
         <dd>The message names the exact variable in <code>.env</code> or field in <code>pipelines.yaml</code> that is invalid. Fix it and rerun.</dd>
         <dt>The dry-run says <code>skipped 3</code> and shows no cards</dt>
         <dd>Those products were already published. Add <code>--force</code> to preview them anyway.</dd>
+        <dt>The storefront says "The deals could not be loaded"</dt>
+        <dd>The website is up but the backend is not. Start it (step 1.12) and press "Try again". If the backend runs
+          on another address, put it in <code>storefront/.env.local</code> as <code>API_ORIGIN=…</code> and restart
+          <code>npm run dev</code>.</dd>
+        <dt>The storefront is empty, or the backend warns "no products yet"</dt>
+        <dd>Run step 1.11. A product is listed only when it has a category, a rating of 4.5 or more and at least 200
+          orders (<code>STOREFRONT_MIN_RATING</code>, <code>STOREFRONT_MIN_ORDERS</code>).</dd>
         <dt>Hebrew looks reversed in the terminal</dt>
         <dd>Most terminals do not render right-to-left text. The text itself is correct; check it in the dashboard.</dd>
       </dl>
@@ -769,10 +847,33 @@ python main.py --retry-failed</code></pre></div>
         <input class="step-check" type="checkbox" id="cb-p2-next-pipeline">
         <div class="step-body">
           <label class="step-title" for="cb-p2-next-pipeline"><span class="step-num"></span> Add the next pipeline</label>
-          <p>A new niche or language is configuration, not code. In the dashboard choose "Create a new pipeline", give
-            it its own id, niche, language and social page (with its own <code>.env</code> variable names), save, and
+          <p>A new category or language is configuration, not code. In the dashboard choose "Create a new pipeline", give
+            it its own id, product type, language and social page (with its own <code>.env</code> variable names), save, and
             run its dry-run.</p>
           <p class="done-when"><strong>Done when:</strong> two pipelines run side by side, each posting to its own page.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-storefront-live">
+        <input class="step-check" type="checkbox" id="cb-p2-storefront-live">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-storefront-live"><span class="step-num"></span> Put the storefront online</label>
+          <p>Do this after a real product source is in place (the demo catalogue's store links are placeholders). On the
+            server run the backend without <code>--reload</code> and serve a production build of the website. The
+            backend address is fixed when the site is built, so set it first.</p>
+          <div class="cmd"><pre><code>python -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+
+cd storefront
+echo "API_ORIGIN=http://127.0.0.1:8000" &gt; .env.local
+echo "NEXT_PUBLIC_SITE_URL=https://your-domain.example" &gt;&gt; .env.local
+npm ci
+npm run build
+npm run start</code></pre></div>
+          <p class="note">Only the website (port 3000) needs to face the internet, behind HTTPS; it forwards
+            <code>/api</code> to the backend itself. Each category then has a link ready for a social bio:
+            <code>https://your-domain.example/he/c/sports</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> a category link opened on a phone shows that collection, and a
+            click on "Continue to Store" appears in the dashboard.</p>
         </div>
       </li>
     </ol>

@@ -37,8 +37,11 @@ def test_dashboard_renders_every_tab_and_runs_a_dry_run(dashboard):
     assert [tab.label for tab in app.tabs][:3] == ["Pipelines", "KPIs & Budget", "Queue & Logs"]
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)
     assert any("Monthly AI spend" in header.value for header in app.subheader)
+    assert any("Storefront click-throughs" in header.value for header in app.subheader)
+    assert {metric.label: metric.value for metric in app.metric}["Storefront clicks"] == "0"
     # Tab 1 flow card: [Input: source] ➔ [Generate: generator + model] ➔ [Output: publishers & pages]
-    card = next(block.value for block in app.markdown if 'class="tsh-flow"' in block.value)
+    cards = [block.value for block in app.markdown if 'class="tsh-flow"' in block.value]
+    card = next(value for value in cards if "aliexpress_mock" in value)
     for expected in ("aliexpress_mock", "llm_text_gen", "model anthropic", "console_pub", "telegram_pub", "TG_SPORTS_BOT_TOKEN"):
         assert expected in card
 
@@ -57,19 +60,19 @@ def test_pipeline_form_validates_then_creates_a_pipeline_that_is_live_immediatel
     app.text_input(key="f_niche_new").set_value("smart_gadgets")
     app.button(key=SAVE).click().run()
     assert any("not valid" in error.value for error in app.error)
-    assert len(db.list_pipelines()) == 1  # nothing was saved
+    assert len(db.list_pipelines()) == 2  # nothing was saved (the two seeded pipelines only)
 
-    app.text_input(key="f_id_new").set_value("gadgets_he")
+    app.text_input(key="f_id_new").set_value("gadgets_en")
     app.text_input(key="f_niche_new").set_value("smart_gadgets")
     app.button(key=SAVE).click().run()
 
     assert not app.exception and not app.error
-    row = db.get_pipeline("gadgets_he")
+    row = db.get_pipeline("gadgets_en")
     assert row["type"] == "smart_gadgets" and row["source_plugin"] == "aliexpress_mock" and row["enabled"] == 1
     assert json.loads(row["social_pages_json"]) == [{"platform": "console_pub", "page_name": "default"}]
     # No restart: the new pipeline already has its card and its own dry-run button.
-    assert any(button.key == "run_gadgets_he" for button in app.button)
-    app.button(key="run_gadgets_he").click().run()
+    assert any(button.key == "run_gadgets_en" for button in app.button)
+    app.button(key="run_gadgets_en").click().run()
     assert not app.exception and any("Dry-run result" in expander.label for expander in app.expander)
 
 
@@ -216,3 +219,24 @@ def test_dashboard_does_not_need_pyarrow(dashboard, monkeypatch):
 
     assert not app.exception
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)
+
+
+def test_kpi_tab_shows_live_storefront_clicks_per_category_and_source(dashboard):
+    from api.seed import seed_storefront
+
+    app, db = dashboard
+    seed_storefront(db)
+    db.record_click_event(1, category="sports", source="aliexpress_mock", language="he", referrer_path="/he")
+    db.record_click_event(8, category="sports", source="temu_mock", language="en", referrer_path="/en/c/sports")
+    db.record_click_event(4, category="gadgets", source="aliexpress_mock", language="he")
+
+    app.button(key="refresh_clicks").click().run()
+
+    assert not app.exception
+    tiles = {metric.label: metric.value for metric in app.metric}
+    assert tiles["Storefront clicks"] == "3" and tiles["Last 24 hours"] == "3" and tiles["Products clicked"] == "3"
+    bars = [block.value for block in app.markdown if 'class="tsh-bars"' in block.value]
+    by_category = next(block for block in bars if "Clicks by category" in block)
+    assert 'title="sports: 2"' in by_category and 'title="gadgets: 1"' in by_category
+    by_source = next(block for block in bars if "Clicks by source" in block)
+    assert 'title="aliexpress_mock: 2"' in by_source and 'title="temu_mock: 1"' in by_source

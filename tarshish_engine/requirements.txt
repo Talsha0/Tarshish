@@ -10,5 +10,10 @@ tzdata>=2024.1; sys_platform == "win32"   # IANA timezones for the worker on Win
 anthropic>=2.8,<3
 google-genai>=3.0,<4
 
+# FindHub storefront API (api/server.py)
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+rapidfuzz>=3.9,<4                    # faster typo-tolerant search; api/search.py falls back to pure Python without it
+
 # Admin & analytics dashboard (uses only basic widgets + HTML, so it does not need pyarrow to load)
 streamlit>=1.67,<2

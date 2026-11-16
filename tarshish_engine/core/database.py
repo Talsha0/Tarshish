@@ -11,10 +11,17 @@ Design notes
   it instead of ``publications.generation_cost_usd`` so that flushing the queue
   (or generating content that never gets a publication row) cannot erase money
   that was really spent.
+* The same file serves the public storefront. ``products`` carries the listing
+  details the storefront shows (category, discount, coupon, flash-sale flag…),
+  added by ``_migrate`` so that databases created before the storefront existed
+  are upgraded in place on the next start. ``click_events`` records every
+  confirmed outbound click.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -26,7 +33,7 @@ from core.resilience import PipelineError, get_logger
 
 logger = get_logger("database")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pipelines (
@@ -108,7 +115,63 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage (created_at);
 """
 
+# Storefront columns of ``products``, added with ALTER TABLE when missing (name -> definition).
+# SQLite can only add a NOT NULL column when it has a default, hence the defaults below.
+PRODUCT_STOREFRONT_COLUMNS: dict[str, str] = {
+    "category": "TEXT",                             # storefront shelf, e.g. 'sports'; NULL = not listed
+    "title_he": "TEXT",                             # Hebrew title for the RTL storefront
+    "original_price": "REAL",
+    "discount_percent": "INTEGER",
+    "rating": "REAL",
+    "orders_count": "INTEGER",
+    "image_urls_json": "TEXT NOT NULL DEFAULT '[]'",
+    "coupon_code": "TEXT",
+    "is_flash_sale": "INTEGER NOT NULL DEFAULT 0",
+    "stock_urgency_label": "TEXT",                  # e.g. 'Limited Stock', 'Top 1% Deal'
+}
+
+# Listing details a caller may set explicitly through ``upsert_product(listing=...)``.
+LISTING_COLUMNS = ("category", "title_he", "coupon_code", "is_flash_sale", "stock_urgency_label")
+
+# Runs after the column migration: it indexes columns that older databases only just gained.
+STOREFRONT_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_products_category ON products (category);
+
+CREATE TABLE IF NOT EXISTS click_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id    INTEGER NOT NULL REFERENCES products (id),
+    category      TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    language      TEXT NOT NULL,
+    referrer_path TEXT NOT NULL DEFAULT '',          -- storefront page the click came from
+    clicked_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_click_events_time     ON click_events (clicked_at);
+CREATE INDEX IF NOT EXISTS idx_click_events_product  ON click_events (product_id, clicked_at);
+CREATE INDEX IF NOT EXISTS idx_click_events_category ON click_events (category, source);
+"""
+
+# ``sort_by`` values of the storefront API -> ORDER BY (a fixed whitelist, never user text).
+STOREFRONT_ORDER: dict[str, str] = {
+    "recommended": "is_flash_sale DESC, COALESCE(discount_percent, 0) DESC, orders_count DESC, id",
+    "rating_desc": "rating DESC, orders_count DESC, id",
+    "price_asc": "price ASC, id",
+    "price_desc": "price DESC, id",
+    "orders_desc": "orders_count DESC, rating DESC, id",
+    "discount_desc": "COALESCE(discount_percent, 0) DESC, orders_count DESC, id",
+}
+
+_STOREFRONT_COLUMNS = (
+    "id, external_id, source, category, title, title_he, price, original_price, discount_percent, currency, "
+    "rating, orders_count, image_urls_json, coupon_code, is_flash_sale, stock_urgency_label, created_at"
+)
+
 _ACTIVE = (PublicationStatus.PENDING.value, PublicationStatus.QUEUED.value)
+
+
+def category_slug(value: str) -> str:
+    """URL-safe storefront category: 'Running & Sports' -> 'running-sports'."""
+    return re.sub(r"[\W_]+", "-", value.casefold()).strip("-")
 
 
 def to_iso(moment: datetime) -> str:
@@ -155,7 +218,30 @@ class Database:
             if str(mode).lower() != "wal":
                 logger.warning("SQLite journal mode is %r, expected 'wal' — concurrent writers may block.", mode)
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+            conn.executescript(STOREFRONT_SCHEMA)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add the storefront columns to a ``products`` table that predates them.
+
+        Additive and idempotent: existing rows and columns are never rewritten. Rows that
+        were stored before the migration keep ``category`` NULL, so they stay off the
+        storefront until a pipeline run or the seeder upserts them again.
+        """
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
+        for name, definition in PRODUCT_STOREFRONT_COLUMNS.items():
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
+            except sqlite3.OperationalError as exc:
+                # Another process (API, dashboard, CLI) started at the same moment and won the race.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+            else:
+                logger.info("Database migration: added products.%s.", name)
 
     def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[dict[str, Any]]:
         """Run a read query and return plain dict rows (used by the dashboard layer)."""
@@ -220,28 +306,143 @@ class Database:
             ) from exc
 
     # -- products ----------------------------------------------------------- #
-    def upsert_product(self, product: Product) -> int:
+    def upsert_product(self, product: Product, listing: Mapping[str, Any] | None = None) -> int:
+        """Insert or refresh a product and return its id.
+
+        Everything a source reports (price, rating, orders, images…) is refreshed on every
+        call. ``listing`` carries the storefront details a source does not know (see
+        ``LISTING_COLUMNS``); only the keys it names are written, so a plain pipeline upsert
+        never wipes a coupon or a category that was set earlier. A new product without an
+        explicit category is filed under its pipeline's product type.
+        """
+        listing = dict(listing or {})
+        unknown = sorted(set(listing) - set(LISTING_COLUMNS))
+        if unknown:
+            raise ValueError(f"unknown listing field(s): {', '.join(unknown)}")
+        values = {
+            "external_id": product.external_id, "source": product.source,
+            "canonical_hash": product.canonical_hash, "niche": product.niche, "title": product.title,
+            "price": product.price, "currency": product.currency, "affiliate_url": product.affiliate_url,
+            "original_price": product.original_price, "discount_percent": product.discount_percent,
+            "rating": product.rating, "orders_count": product.orders_count,
+            "image_urls_json": json.dumps(product.image_urls),
+            "category": category_slug(str(listing.get("category") or product.niche)),
+            "title_he": listing.get("title_he"), "coupon_code": listing.get("coupon_code"),
+            "is_flash_sale": int(bool(listing.get("is_flash_sale", False))),
+            "stock_urgency_label": listing.get("stock_urgency_label"),
+            "created_at": to_iso(utcnow()),
+        }
+        refreshed = [
+            "canonical_hash", "niche", "title", "price", "currency", "affiliate_url", "original_price",
+            "discount_percent", "rating", "orders_count", "image_urls_json", *listing,
+        ]
+        updates = [f"{name} = excluded.{name}" for name in refreshed]
+        if "category" not in listing:
+            updates.append("category = COALESCE(NULLIF(products.category, ''), excluded.category)")
         with self.connect() as conn:
             row = conn.execute(
-                """
-                INSERT INTO products (external_id, source, canonical_hash, niche, title, price, currency,
-                                      affiliate_url, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (source, external_id) DO UPDATE SET
-                    canonical_hash = excluded.canonical_hash,
-                    niche = excluded.niche,
-                    title = excluded.title,
-                    price = excluded.price,
-                    currency = excluded.currency,
-                    affiliate_url = excluded.affiliate_url
+                f"""
+                INSERT INTO products ({', '.join(values)})
+                VALUES ({', '.join(f':{name}' for name in values)})
+                ON CONFLICT (source, external_id) DO UPDATE SET {', '.join(updates)}
                 RETURNING id
                 """,
-                (
-                    product.external_id, product.source, product.canonical_hash, product.niche, product.title,
-                    product.price, product.currency, product.affiliate_url, to_iso(utcnow()),
-                ),
+                values,
             ).fetchone()
             return int(row["id"])
+
+    # -- storefront ----------------------------------------------------------- #
+    @staticmethod
+    def _storefront_filter(
+        *, category: str | None = None, store: str | None = None, min_rating: float = 0.0,
+        min_orders: int = 0, min_price: float | None = None, max_price: float | None = None,
+    ) -> tuple[str, list[Any]]:
+        """WHERE clause + parameters selecting listed products that pass the given filters."""
+        clauses = ["category IS NOT NULL", "category != ''", "rating >= ?", "orders_count >= ?"]
+        params: list[Any] = [min_rating, min_orders]
+        if category:
+            clauses.append("category = ?")
+            params.append(category)
+        if store:
+            # 'aliexpress' matches the real plugin and its variants ('aliexpress_mock').
+            escaped = store.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            clauses.append("(source = ? OR source LIKE ? ESCAPE '!')")
+            params.extend([store, f"{escaped}!_%"])
+        if min_price is not None:
+            clauses.append("price >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            clauses.append("price <= ?")
+            params.append(max_price)
+        return " AND ".join(clauses), params
+
+    def list_storefront_products(
+        self, *, sort_by: str = "recommended", limit: int | None = None, offset: int = 0, **filters: Any,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """One page of listed products plus the number of products that match the filters."""
+        where, params = self._storefront_filter(**filters)
+        order = STOREFRONT_ORDER[sort_by]
+        page = "" if limit is None else " LIMIT ? OFFSET ?"
+        page_params = [] if limit is None else [limit, offset]
+        with self.connect() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM products WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT {_STOREFRONT_COLUMNS} FROM products WHERE {where} ORDER BY {order}{page}",
+                [*params, *page_params],
+            ).fetchall()
+        return [dict(row) for row in rows], int(total)
+
+    def get_storefront_product(
+        self, product_id: int, *, min_rating: float = 0.0, min_orders: int = 0
+    ) -> dict[str, Any] | None:
+        """A listed product including its ``affiliate_url``; ``None`` when missing or not listed."""
+        where, params = self._storefront_filter(min_rating=min_rating, min_orders=min_orders)
+        return self.query_one(
+            f"SELECT {_STOREFRONT_COLUMNS}, affiliate_url FROM products WHERE id = ? AND {where}",
+            [product_id, *params],
+        )
+
+    def storefront_category_stats(self, *, min_rating: float = 0.0, min_orders: int = 0) -> list[dict[str, Any]]:
+        """Per category: product count, best rating and highest order count (largest category first)."""
+        where, params = self._storefront_filter(min_rating=min_rating, min_orders=min_orders)
+        return self.query(
+            f"""
+            SELECT category, COUNT(*) AS products, MAX(rating) AS top_rating, MAX(orders_count) AS top_orders
+            FROM products WHERE {where}
+            GROUP BY category ORDER BY products DESC, category
+            """,
+            params,
+        )
+
+    def storefront_facets(self, **filters: Any) -> dict[str, Any]:
+        """Stores and price bounds available inside a scope (used to draw the filter controls)."""
+        where, params = self._storefront_filter(**filters)
+        sources = self.query(
+            f"SELECT source, COUNT(*) AS products FROM products WHERE {where} GROUP BY source ORDER BY source", params
+        )
+        bounds = self.query_one(f"SELECT MIN(price) AS low, MAX(price) AS high FROM products WHERE {where}", params)
+        return {"sources": sources, "price_min": (bounds or {}).get("low"), "price_max": (bounds or {}).get("high")}
+
+    def record_click_event(
+        self, product_id: int, *, category: str, source: str, language: str, referrer_path: str = "",
+        clicked_at: datetime | None = None,
+    ) -> int:
+        """Log one confirmed outbound click from the storefront."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO click_events (product_id, category, source, language, referrer_path, clicked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (product_id, category, source, language, referrer_path, to_iso(clicked_at or utcnow())),
+            )
+            return int(cursor.lastrowid)  # type: ignore[arg-type]
+
+    def click_counts_since(self, since: datetime) -> dict[int, int]:
+        """Outbound clicks per product from ``since`` until now."""
+        rows = self.query(
+            "SELECT product_id, COUNT(*) AS clicks FROM click_events WHERE clicked_at >= ? GROUP BY product_id",
+            (to_iso(since),),
+        )
+        return {int(row["product_id"]): int(row["clicks"]) for row in rows}
 
     # -- publications ------------------------------------------------------- #
     def handled_targets(self, pipeline_id: str, canonical_hash: str) -> set[tuple[str, str]]:

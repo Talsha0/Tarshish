@@ -12,14 +12,19 @@ Metric semantics
 * AI spend comes from the append-only ``ai_usage`` ledger — the same figure
   the budget guardrail enforces. The per-platform view uses the cost share
   attributed to each publication row instead (a platform has no ledger entry).
+* Storefront clicks are a separate, exact count: one ``click_events`` row per
+  confirmed outbound click on the public storefront. They are not mixed into the
+  publication KPIs above, which describe posts on social platforms.
 """
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from core.config import Settings
-from core.database import Database
+from core.database import Database, to_iso
+from core.models import utcnow
 
 # Latest snapshot per publication, shared by every aggregation below.
 _LATEST_SNAPSHOT_CTE = """
@@ -136,6 +141,64 @@ class MetricsService:
             """
         )
         return [_with_ratios(row) for row in rows]
+
+    # -- storefront click-throughs ----------------------------------------------- #
+    # ``click_events`` holds one row per confirmed outbound click on the public storefront,
+    # written by the storefront API the moment a shopper continues to the store.
+    def get_storefront_click_summary(self) -> dict[str, Any]:
+        """Outbound storefront clicks: all time, last 7 days, last 24 hours."""
+        now = utcnow()
+        row = self.db.query_one(
+            """
+            SELECT COUNT(*)                                AS total_clicks,
+                   COALESCE(SUM(clicked_at >= :week), 0)   AS clicks_7d,
+                   COALESCE(SUM(clicked_at >= :day), 0)    AS clicks_24h,
+                   COUNT(DISTINCT product_id)              AS products_clicked,
+                   MAX(clicked_at)                         AS last_click_at
+            FROM click_events
+            """,
+            {"week": to_iso(now - timedelta(days=7)), "day": to_iso(now - timedelta(days=1))},
+        ) or {}
+        return {
+            "total_clicks": int(row.get("total_clicks") or 0),
+            "clicks_7d": int(row.get("clicks_7d") or 0),
+            "clicks_24h": int(row.get("clicks_24h") or 0),
+            "products_clicked": int(row.get("products_clicked") or 0),
+            "last_click_at": row.get("last_click_at"),
+        }
+
+    def _storefront_clicks_by(self, column: str) -> list[dict[str, Any]]:
+        """Click counts grouped by ``category`` or ``source``, including listed groups with no clicks yet."""
+        if column not in ("category", "source"):
+            raise ValueError(f"unsupported click breakdown: {column}")
+        now = utcnow()
+        return self.db.query(
+            f"""
+            WITH scope AS (
+                SELECT {column} AS name FROM products WHERE category IS NOT NULL AND category != ''
+                UNION
+                SELECT {column} FROM click_events
+            )
+            SELECT s.name                                    AS {column},
+                   COUNT(c.id)                               AS clicks,
+                   COALESCE(SUM(c.clicked_at >= :week), 0)   AS clicks_7d,
+                   COALESCE(SUM(c.clicked_at >= :day), 0)    AS clicks_24h,
+                   COUNT(DISTINCT c.product_id)              AS products_clicked,
+                   MAX(c.clicked_at)                         AS last_click_at
+            FROM scope s LEFT JOIN click_events c ON c.{column} = s.name
+            GROUP BY s.name
+            ORDER BY clicks DESC, s.name
+            """,
+            {"week": to_iso(now - timedelta(days=7)), "day": to_iso(now - timedelta(days=1))},
+        )
+
+    def get_storefront_clicks_by_category(self) -> list[dict[str, Any]]:
+        """One row per storefront category."""
+        return self._storefront_clicks_by("category")
+
+    def get_storefront_clicks_by_source(self) -> list[dict[str, Any]]:
+        """One row per product source (store)."""
+        return self._storefront_clicks_by("source")
 
     def get_budget_status(self) -> dict[str, Any]:
         """Month-to-date AI spend against ``MAX_MONTHLY_AI_BUDGET_USD``."""

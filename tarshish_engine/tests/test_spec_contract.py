@@ -75,9 +75,10 @@ def test_plugin_contracts_have_the_specified_members_and_signatures():
 
 
 def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
-    assert engine.plugins.names("source") == ["aliexpress_mock"]
+    # _mock_catalogue is data, not a plugin
+    assert engine.plugins.names("source") == ["aliexpress_mock", "temu_mock", "temu_rapidapi"]
     assert engine.plugins.names("generator") == ["llm_text_gen", "video_gen_stub"]
-    assert engine.plugins.names("publisher") == ["console_pub", "telegram_pub"]
+    assert engine.plugins.names("publisher") == ["console_pub", "instagram_pub", "telegram_pub"]
     assert engine.plugins.names("storage") == ["cloud", "local"]
     assert engine.plugins.load_errors == {}
     # core/ must not name a concrete plugin module (the dry-run publisher is a setting, not an import).
@@ -154,21 +155,26 @@ def test_metrics_service_exposes_the_specified_aggregations(engine):
     assert {"total_views", "total_clicks", "total_conversions", "revenue_usd", "ai_spend_usd", "net_profit_usd",
             "total_text", "total_videos"} <= set(summary)
     assert metrics.get_metrics_by_platform() == []
-    assert [row["pipeline_id"] for row in metrics.get_metrics_by_pipeline()] == ["sports_he"]
+    assert sorted(row["pipeline_id"] for row in metrics.get_metrics_by_pipeline()) == ["gadgets_he", "sports_he"]
 
 
 # -- §6 resilience ------------------------------------------------------------------------------ #
 def test_retry_decorator_wraps_every_external_call():
     from plugins.generators.llm_text_gen import LLMTextGenerator
+    from plugins.publishers.instagram_pub import InstagramPublisher
     from plugins.publishers.telegram_pub import TelegramPublisher
     from plugins.sources.aliexpress_mock import AliExpressMockSource
+    from plugins.sources.temu_rapidapi import TemuRapidApiSource
 
     wrapped = [
         AliExpressMockSource.fetch_products,   # source fetching
+        TemuRapidApiSource._request,
         LLMTextGenerator._call_anthropic,      # LLM calls
         LLMTextGenerator._call_gemini,
         TelegramPublisher._send,               # publishers
         TelegramPublisher._asend,
+        InstagramPublisher._call,
+        InstagramPublisher._await_container,
     ]
     assert all(hasattr(function, "__wrapped__") for function in wrapped)
 
@@ -179,7 +185,8 @@ def test_cli_exposes_the_specified_flags():
 
     actions = main.build_parser()._actions
     options = {option for action in actions for option in action.option_strings}
-    assert {"--pipeline", "--mode", "--limit", "--dry-run", "--stats", "--flush-queue"} <= options
+    assert {"--pipeline", "--mode", "--limit", "--dry-run", "--stats", "--flush-queue", "--seed-storefront",
+            "--seed-temu", "--category", "--keyword", "--job"} <= options
     mode = next(action for action in actions if "--mode" in action.option_strings)
     assert list(mode.choices) == ["immediate", "queued", "worker"]
 
@@ -271,12 +278,12 @@ def test_every_third_party_import_is_declared_in_requirements():
     distribution_for = {
         "pydantic": "pydantic", "pydantic_settings": "pydantic-settings", "ruamel": "ruamel.yaml",
         "dotenv": "python-dotenv", "httpx": "httpx", "anthropic": "anthropic", "google": "google-genai",
-        "streamlit": "streamlit", "pytest": "pytest",
+        "streamlit": "streamlit", "pytest": "pytest", "fastapi": "fastapi", "rapidfuzz": "rapidfuzz",
     }
-    local = {"core", "plugins", "storage", "dashboard", "main", "tests", "conftest"}
+    local = {"core", "plugins", "storage", "dashboard", "api", "main", "tests", "conftest"}
     imported: set[str] = set()
     for path in ROOT.rglob("*.py"):
-        if ".venv" in path.parts:
+        if {".venv", "node_modules", ".next"} & set(path.parts):  # node_modules ships Python build scripts
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
@@ -302,7 +309,11 @@ def test_env_example_documents_every_setting():
     names = {name.upper() for name in Settings.model_fields} - {"DRY_RUN_PUBLISHER"}
     names |= {"TG_SPORTS_BOT_TOKEN", "TG_SPORTS_CHAT_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
               "ANTHROPIC_MODEL", "GEMINI_MODEL", "ANTHROPIC_EFFORT", "LLM_MAX_OUTPUT_TOKENS",
-              "LLM_PRICE_OVERRIDES", "AFFILIATE_DISCLOSURE"}
+              "LLM_PRICE_OVERRIDES", "AFFILIATE_DISCLOSURE",
+              "STOREFRONT_ORIGINS", "STOREFRONT_MIN_RATING", "STOREFRONT_MIN_ORDERS",
+              "RAPIDAPI_KEY", "RAPIDAPI_TEMU_HOST", "TEMU_TRACKING_ID", "TEMU_AFFILIATE_URL_TEMPLATE",
+              "TEMU_MAX_ITEMS", "TEMU_CURRENCY", "TEMU_JOB_TIMEOUT", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID",
+              "INSTAGRAM_GRAPH_API_VERSION"}
     assert not [name for name in sorted(names) if name not in example]
 
 

@@ -9,6 +9,9 @@ Examples
     python main.py --mode worker                                     # publish the queue with jitter
     python main.py --stats                                           # queue size, published, AI spend
     python main.py --flush-queue                                     # drop pending/queued items
+    python main.py --seed-storefront                                 # load the storefront demo catalogue
+    python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
+                                                                     # real Temu products, one API request, no LLM
 """
 
 from __future__ import annotations
@@ -96,6 +99,21 @@ def build_parser() -> argparse.ArgumentParser:
     manage.add_argument(
         "--sync-config", action="store_true", help="upsert config/pipelines.yaml into the database (overwrites edits)"
     )
+    manage.add_argument(
+        "--seed-storefront", action="store_true",
+        help="load the demo catalogue (14 mock products, two stores) into the FindHub storefront",
+    )
+    manage.add_argument(
+        "--seed-temu", action="store_true",
+        help="load real Temu products into the storefront: one RapidAPI search, no LLM calls "
+             "(needs --category; --keyword and --limit are optional)",
+    )
+    manage.add_argument("--category", metavar="NAME", help="with --seed-temu: storefront category to file the products under")
+    manage.add_argument("--keyword", metavar="TEXT", help="with --seed-temu: search terms (default: the category name)")
+    manage.add_argument(
+        "--job", metavar="ID",
+        help="with --seed-temu: collect the results of an earlier search job instead of starting a new search",
+    )
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="override LOG_LEVEL")
     return parser
 
@@ -154,6 +172,41 @@ def cmd_list_pipelines(engine) -> None:
         pages = ", ".join(page.label for page in p.social_pages)
         print(f"   {p.id:<18} {state} {p.language}  {p.source} ➔ {p.generator} [{p.llm_model}] ➔ {pages}"
               f"  ({p.publishing_mode})")
+    print(_RULE)
+
+
+def print_temu_seed(report, limit: int) -> None:
+    from plugins import format_price, is_placeholder_image
+
+    def row(mark: str, status: str, product) -> str:
+        title = product.title if len(product.title) <= 38 else product.title[:37] + "…"
+        return (f"   {mark} {status:<10} {product.external_id:<16} ⭐ {product.rating:<4g}"
+                f"{product.orders_count:>9,} sold {format_price(product.price, product.currency):>9}  {title}")
+
+    print(_RULE)
+    print(f" Temu seed · category {report.category} · keyword \"{report.keyword}\" · 1 search, no LLM calls")
+    print(
+        f" received {report.received} · inserted {len(report.inserted)} · skipped {len(report.duplicates)} duplicate"
+        f" · {len(report.over_limit)} beyond --limit {limit} · {len(report.rejected)} rejected"
+        f" (standard: rating ≥ {report.min_rating:g}, sold ≥ {report.min_orders:,})"
+    )
+    for product in report.inserted:
+        print(row("✓", "inserted", product))
+    for product in report.duplicates:
+        print(row("-", "duplicate", product))
+    for product in report.over_limit:
+        print(row("·", "not kept", product))
+    for label, reason in report.rejected:
+        print(f"   ✗ rejected   {label} — {reason}")
+    if report.notice:
+        print(f"   ! API notice: {report.notice}")
+    if any(product.affiliate_url == product.raw_url for product in report.inserted):
+        print("   ! TEMU_TRACKING_ID is not set: the stored links are plain product URLs, not affiliate links.")
+    stand_ins = sum(1 for product in report.inserted if any(is_placeholder_image(url) for url in product.image_urls))
+    if stand_ins:
+        print(f"   ! {stand_ins} product(s) came without a photo and show a stand-in picture until enriched.")
+    if report.received == 0:
+        print("   ! The search finished but found no items for this keyword. Try broader search terms.")
     print(_RULE)
 
 
@@ -218,6 +271,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--mode worker consumes the queue; it cannot be combined with --pipeline/--limit/--dry-run/--force")
     if args.once and args.mode != "worker":
         parser.error("--once only applies to --mode worker")
+    if args.seed_temu:
+        if not args.category:
+            parser.error("--seed-temu needs --category NAME (for example: --category gadgets)")
+        if args.dry_run or args.mode:
+            parser.error("--seed-temu makes one real API request and writes products; "
+                         "it cannot be combined with --dry-run or --mode")
+    elif args.category or args.keyword or args.job:
+        parser.error("--category, --keyword and --job only apply to --seed-temu")
 
     try:
         from core import bootstrap
@@ -240,6 +301,19 @@ def main(argv: list[str] | None = None) -> int:
             management = True
             print(f"Synced {engine.registry.sync_from_yaml()} pipeline(s) from "
                   f"{engine.settings.pipelines_config_path.name} into the database.")
+        if args.seed_storefront:
+            management = True
+            from api.seed import seed_storefront
+
+            print(f"Seeded {seed_storefront(engine.db)} demo product(s) into "
+                  f"{engine.settings.database_path.name} for the storefront.")
+        if args.seed_temu:
+            management = True
+            from api.seed import seed_temu
+
+            limit = args.limit or 10
+            report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
+            print_temu_seed(report, limit)
         if args.flush_queue:
             management = True
             print(f"Flushed {engine.db.flush_queue(args.pipeline)} pending/queued publication(s).")

@@ -1,0 +1,59 @@
+import type { Metadata, Viewport } from "next";
+import { Assistant, Frank_Ruhl_Libre } from "next/font/google";
+import { notFound } from "next/navigation";
+import type { ReactNode } from "react";
+
+import { Providers } from "@/components/Toaster";
+import { LANGS, dirOf, getDictionary, isLang } from "@/lib/i18n";
+
+import "../globals.css";
+
+// Two families, both drawn for Hebrew and Latin. Assistant carries the interface and the
+// prices; Frank Ruhl Libre, the classic Hebrew book face, is kept for the headlines.
+const sans = Assistant({ subsets: ["hebrew", "latin"], variable: "--font-sans", display: "swap" });
+const display = Frank_Ruhl_Libre({
+  subsets: ["hebrew", "latin"],
+  weight: ["700", "900"],
+  variable: "--font-display",
+  display: "swap",
+});
+
+type LayoutProps = { children: ReactNode; params: Promise<{ lang: string }> };
+
+export function generateStaticParams() {
+  return LANGS.map((lang) => ({ lang }));
+}
+
+export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
+  const { lang } = await params;
+  if (!isLang(lang)) return {};
+  const t = getDictionary(lang);
+  return {
+    metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+    title: t.meta.title,
+    description: t.meta.description,
+    applicationName: "FindHub",
+    alternates: { canonical: `/${lang}`, languages: { he: "/he", en: "/en" } },
+    openGraph: {
+      type: "website",
+      siteName: "FindHub",
+      title: t.meta.title,
+      description: t.meta.description,
+      locale: lang === "he" ? "he_IL" : "en_US",
+    },
+  };
+}
+
+export const viewport: Viewport = { themeColor: "#0F4C3A", colorScheme: "light" };
+
+export default async function LangLayout({ children, params }: LayoutProps) {
+  const { lang } = await params;
+  if (!isLang(lang)) notFound();
+  return (
+    <html lang={lang} dir={dirOf(lang)} className={`${sans.variable} ${display.variable}`}>
+      <body className="min-h-dvh">
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
+}

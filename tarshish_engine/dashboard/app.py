@@ -7,7 +7,8 @@ Run from the project root:
 Tabs
 ----
 1. Pipelines   — visual wiring (source ➔ generator + model ➔ social pages), create / edit, enable, dry-run
-2. KPIs        — reach, revenue, net profit and the monthly AI budget guardrail
+2. KPIs        — reach, revenue, net profit, the monthly AI budget guardrail and live
+                 storefront click-throughs per category and source
 3. Queue/Logs  — queued / published / failed publications, retry, flush, log tail
 
 The page talks to the same engine objects as the CLI (``core`` + ``MetricsService``),
@@ -634,6 +635,44 @@ def render_metrics_entry(engine: Engine) -> None:
                 st.rerun()
 
 
+def render_storefront_clicks(engine: Engine, metrics: MetricsService) -> None:
+    """Outbound clicks on the public storefront, read from ``click_events`` on every redraw.
+
+    No auto-refreshing fragment on purpose: ``st.fragment(run_every=...)`` imports numpy, one of the
+    native libraries Windows Smart App Control blocks. The button below redraws the page instead.
+    """
+    summary = metrics.get_storefront_click_summary()
+    head = st.columns([5, 1.2], vertical_alignment="bottom")
+    head[0].subheader("Storefront click-throughs")
+    head[1].button("Refresh clicks", key="refresh_clicks", width="stretch")
+    last = local_time(engine, summary["last_click_at"])
+    st.caption(
+        "Confirmed outbound clicks on the FindHub storefront (shopper pressed “Continue to Store”), "
+        "counted live from the database. " + (f"Last click: {last}." if last else "No clicks recorded yet.")
+    )
+    tiles = st.columns(4)
+    tiles[0].metric("Storefront clicks", compact(summary["total_clicks"]), border=True, help="All time")
+    tiles[1].metric("Last 7 days", compact(summary["clicks_7d"]), border=True)
+    tiles[2].metric("Last 24 hours", compact(summary["clicks_24h"]), border=True)
+    tiles[3].metric("Products clicked", compact(summary["products_clicked"]), border=True,
+                    help="Distinct products with at least one outbound click")
+
+    by_category = metrics.get_storefront_clicks_by_category()
+    by_source = metrics.get_storefront_clicks_by_source()
+    columns = {"clicks": "Clicks", "clicks_7d": "Last 7 days", "clicks_24h": "Last 24 hours",
+               "products_clicked": "Products clicked", "last_click_at": "Last click"}
+    formats = {"clicks": whole, "clicks_7d": whole, "clicks_24h": whole, "products_clicked": whole,
+               "last_click_at": lambda value: local_time(engine, value)}
+    numeric = ("clicks", "clicks_7d", "clicks_24h", "products_clicked")
+    left, right = st.columns(2)
+    with left:
+        ranked_bars(by_category, "category", "clicks", "Clicks by category", whole)
+        html_table(by_category, {"category": "Category", **columns}, formats=formats, numeric=numeric)
+    with right:
+        ranked_bars(by_source, "source", "clicks", "Clicks by source", whole)
+        html_table(by_source, {"source": "Source", **columns}, formats=formats, numeric=numeric)
+
+
 def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
     summary = metrics.get_overall_summary()
     budget = metrics.get_budget_status()
@@ -669,6 +708,7 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
         "By pipeline", metrics.get_metrics_by_pipeline(), "pipeline_id", "Pipeline",
         "AI spend per pipeline comes from the AI usage ledger (includes content that was later flushed).",
     )
+    render_storefront_clicks(engine, metrics)
     render_metrics_entry(engine)
 
 

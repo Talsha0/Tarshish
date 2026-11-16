@@ -98,11 +98,11 @@ def test_pipeline_round_trips_through_the_database(engine):
 
 
 def test_database_is_seeded_once_then_is_the_source_of_truth(engine, make_settings):
-    assert [p.id for p in engine.registry.list_pipelines()] == ["sports_he"]
+    assert sorted(p.id for p in engine.registry.list_pipelines()) == ["gadgets_he", "sports_he"]
     engine.registry.set_enabled("sports_he", False)
     again = bootstrap(settings=make_settings(), console_logging=False)  # restart: YAML must not overwrite the DB
     assert again.registry.get_pipeline("sports_he").enabled is False
-    assert again.registry.sync_from_yaml() == 1  # explicit re-sync does
+    assert again.registry.sync_from_yaml() == 2  # explicit re-sync does
     assert again.registry.get_pipeline("sports_he").enabled is True
 
 

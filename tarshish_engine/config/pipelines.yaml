@@ -29,3 +29,30 @@ pipelines:
         page_name: "@my_sports_channel"
         token_env_var: "TG_SPORTS_BOT_TOKEN"
         chat_id_env_var: "TG_SPORTS_CHAT_ID"
+
+  # Real Temu gadgets (RapidAPI) ➔ Hebrew captions ➔ console + Instagram, paced by the queue worker.
+  # Needs RAPIDAPI_KEY for live runs; a --dry-run previews the products stored by
+  #     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
+  - id: "gadgets_he"
+    enabled: true
+    category: "gadgets"
+    language: "he"
+    source: "temu_rapidapi"            # plugins/sources/temu_rapidapi.py — one API request per run
+    generator: "llm_text_gen"
+    llm_model: "claude-sonnet-5-5"
+    publishers: ["console_pub", "instagram_pub"]
+    publishing_mode: "queued"
+    filters:                           # applied locally to the fetched batch
+      min_rating: 4.5
+      min_orders: 500
+    options:
+      search_config:                   # query parameters of the Temu API request
+        keyword: "tech gadgets"
+        l2Category: "Electronics & Appliances"
+        priceMin: 1
+        priceMax: 100
+    social_pages:
+      - platform: "instagram_pub"
+        page_name: "gadgets"
+        token_env_var: "INSTAGRAM_ACCESS_TOKEN"
+        account_id_env_var: "INSTAGRAM_BUSINESS_ACCOUNT_ID"

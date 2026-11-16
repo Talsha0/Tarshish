@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --tag: #ffd43b;
+    --tag-deep: #efb900;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: 6rem;
+  }
+
+  body {
+    @apply bg-paper font-sans text-base text-ink antialiased;
+    font-feature-settings: "kern";
+  }
+
+  /* One visible focus style everywhere; the mouse does not trigger it. */
+  :focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-spruce-bright;
+  }
+
+  ::selection {
+    background: var(--tag);
+    color: #1d1700;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="search"]::-webkit-search-cancel-button {
+    display: none;
+  }
+}
+
+@layer components {
+  /*
+   * The shelf label: FindHub's one loud element. A cut-card price tag, pointed and
+   * punched on its leading edge, holding the price a shopper pays right now.
+   * The point and the hole follow the reading direction.
+   */
+  .price-tag {
+    --point: 0.62em;
+    position: relative;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.12em;
+    padding-block: 0.2em 0.24em;
+    padding-inline: calc(var(--point) + 0.72em) 0.6em;
+    background: var(--tag);
+    color: #1d1700;
+    font-weight: 800;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums lining-nums;
+    white-space: nowrap;
+    box-shadow: inset 0 -0.11em 0 var(--tag-deep);
+    clip-path: polygon(var(--point) 0, 100% 0, 100% 100%, var(--point) 100%, 0 50%);
+    -webkit-mask-image: radial-gradient(circle at calc(var(--point) + 0.18em) 50%, transparent 0.15em, #000 0.17em);
+    mask-image: radial-gradient(circle at calc(var(--point) + 0.18em) 50%, transparent 0.15em, #000 0.17em);
+  }
+  [dir="rtl"] .price-tag {
+    clip-path: polygon(0 0, calc(100% - var(--point)) 0, 100% 50%, calc(100% - var(--point)) 100%, 0 100%);
+    -webkit-mask-image: radial-gradient(
+      circle at calc(100% - var(--point) - 0.18em) 50%,
+      transparent 0.15em,
+      #000 0.17em
+    );
+    mask-image: radial-gradient(circle at calc(100% - var(--point) - 0.18em) 50%, transparent 0.15em, #000 0.17em);
+  }
+  .price-tag__symbol {
+    font-size: 0.62em;
+    font-weight: 700;
+  }
+  /* The brand mark: the same label holding a check. The wordmark is Latin, so it always points left. */
+  .price-tag.price-tag--mark,
+  [dir="rtl"] .price-tag.price-tag--mark {
+    align-items: center;
+    padding: 0.42em 0.5em 0.42em calc(var(--point) + 0.42em);
+    clip-path: polygon(var(--point) 0, 100% 0, 100% 100%, var(--point) 100%, 0 50%);
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  /* Loading placeholder: a block with one soft highlight sweeping across it. */
+  .skeleton {
+    @apply relative overflow-hidden rounded bg-line/70;
+  }
+  .skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.75), transparent);
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+  [dir="rtl"] .skeleton::after {
+    animation-direction: reverse;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+}

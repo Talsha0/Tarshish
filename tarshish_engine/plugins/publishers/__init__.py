@@ -24,15 +24,19 @@ def utf16_length(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def render_post_text(content: GeneratedContent, *, max_length: int | None = None, disclosure: bool = True) -> str:
+def render_post_text(
+    content: GeneratedContent, *, max_length: int | None = None, disclosure: bool = True,
+    call_to_action: str | None = None,
+) -> str:
     """Final post body: caption, affiliate link, hashtags and an affiliate disclosure.
 
     The link is always appended here (never trusted to the LLM). When
     ``max_length`` is given the hashtags are dropped first and then the caption
-    is shortened — the link itself is never cut.
+    is shortened — the link itself is never cut. Platforms whose captions cannot
+    carry a clickable link pass ``call_to_action``, which takes the link's place.
     """
     lang = content.language.split("-")[0]
-    link = f"{_LINK_LABEL.get(lang, _LINK_LABEL['en'])} {content.product.affiliate_url}"
+    link = call_to_action or f"{_LINK_LABEL.get(lang, _LINK_LABEL['en'])} {content.product.affiliate_url}"
     tags = " ".join(f"#{tag}" for tag in content.hashtags)
     note = _DISCLOSURE.get(lang, _DISCLOSURE["en"]) if disclosure else ""
 

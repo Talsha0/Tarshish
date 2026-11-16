@@ -240,7 +240,7 @@ class PipelineConfig(BaseModel):
 
     id: str
     enabled: bool = True
-    niche: str = Field(min_length=1, validation_alias=AliasChoices("niche", "type"))
+    niche: str = Field(min_length=1, validation_alias=AliasChoices("category", "niche", "type"))
     language: str = "en"
     source: str = Field(min_length=1, validation_alias=AliasChoices("source", "source_plugin"))
     generator: str = Field(min_length=1, validation_alias=AliasChoices("generator", "generator_plugin"))
