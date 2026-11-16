@@ -1,0 +1,914 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tarshish Engine · Setup Roadmap</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f5f2ec;
+    --surface: #fffdf9;
+    --ink: #16222e;
+    --muted: #5a6572;
+    --line: #ddd6c9;
+    --line-strong: #b9b0a0;
+    --p1: #0e7c7b;
+    --p1-soft: #d9eeec;
+    --p2: #b4621b;
+    --p2-soft: #f6e4d2;
+    --code-bg: #121c26;
+    --code-ink: #e6edf3;
+    --code-line: #263544;
+    --warn-bg: #fbefd3;
+    --warn-ink: #6b4a05;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #0e161e;
+      --surface: #16222e;
+      --ink: #ebe6db;
+      --muted: #9ca7b3;
+      --line: #263544;
+      --line-strong: #41566b;
+      --p1: #46bfb4;
+      --p1-soft: #173a3b;
+      --p2: #e39b52;
+      --p2-soft: #3d2b19;
+      --code-bg: #0a1017;
+      --code-ink: #e6edf3;
+      --code-line: #263544;
+      --warn-bg: #3a2f14;
+      --warn-ink: #f3d896;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 var(--sans);
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: inherit; }
+  code, kbd { font-family: var(--mono); font-size: .9em; }
+  :not(pre) > code {
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    padding: .08em .36em;
+    border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+
+  /* ── Sticky progress bar ─────────────────────────────────────────────── */
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--bg) 92%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar .wrap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-block: 10px; }
+  .topbar .name { font-family: var(--serif); font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
+  .topbar .meter { flex: 1 1 160px; }
+  .topbar .count { font-size: .85rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .85rem; }
+  .tools label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); }
+  .btn {
+    font: inherit; font-size: .82rem; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: 7px; padding: 4px 10px; cursor: pointer;
+  }
+  .btn:hover { border-color: var(--ink); }
+  .btn:focus-visible, .step-check:focus-visible, .copy:focus-visible, summary:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--p1) 60%, transparent); outline-offset: 2px;
+  }
+  .meter { height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 12%, transparent); overflow: hidden; }
+  .meter > span { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--ink); transition: width .35s ease; }
+
+  /* ── Masthead ────────────────────────────────────────────────────────── */
+  .masthead { padding: 44px 0 8px; }
+  .kicker { font-size: .74rem; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+  h1 { font-family: var(--serif); font-size: clamp(2rem, 5.2vw, 3rem); line-height: 1.12; margin: 8px 0 12px; letter-spacing: -.01em; }
+  .lede { font-size: 1.08rem; color: var(--muted); max-width: 62ch; margin: 0; }
+  .notice {
+    margin: 22px 0 0; padding: 12px 16px; border-radius: 10px;
+    background: var(--warn-bg); color: var(--warn-ink); font-size: .93rem;
+  }
+
+  /* ── Status board ────────────────────────────────────────────────────── */
+  .status { margin: 30px 0 6px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .status .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .status h3 { margin: 0 0 6px; font-size: .95rem; }
+  .status ul { margin: 0; padding-left: 18px; font-size: .9rem; color: var(--muted); }
+  .status li { margin: 2px 0; }
+
+  /* ── Phases ──────────────────────────────────────────────────────────── */
+  .phase { --accent: var(--p1); --accent-soft: var(--p1-soft); counter-reset: step; margin-top: 52px; }
+  .phase[data-phase="2"] { --accent: var(--p2); --accent-soft: var(--p2-soft); }
+  .phase-head { border-top: 3px solid var(--accent); padding-top: 16px; }
+  .phase-head .kicker { color: var(--accent); font-weight: 700; }
+  h2 { font-family: var(--serif); font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; margin: 4px 0 8px; }
+  .phase-intro { color: var(--muted); margin: 0 0 14px; max-width: 66ch; }
+  .phase-progress { display: flex; align-items: center; gap: 12px; }
+  .phase-progress .meter { flex: 1; }
+  .phase-progress .meter > span { background: var(--accent); }
+  .phase-progress .count { font-size: .85rem; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .phase.is-complete .phase-progress .count::after { content: " · complete ✓"; color: var(--accent); font-weight: 700; }
+
+  h3.group { font-size: .78rem; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin: 34px 0 4px 52px; }
+
+  /* ── Timeline of steps ───────────────────────────────────────────────── */
+  ol.steps { list-style: none; margin: 14px 0 0; padding: 0; }
+  .step { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); counter-increment: step; }
+  .step::before {               /* the rail */
+    content: ""; position: absolute; left: 17px; top: 0; bottom: 0; width: 2px; background: var(--line);
+  }
+  ol.steps > .step:first-child::before { top: 18px; }
+  ol.steps > .step:last-child::before { bottom: calc(100% - 18px); }
+  .step.is-done::before { background: var(--accent); }
+
+  .step-check {
+    appearance: none; -webkit-appearance: none;
+    position: relative; z-index: 1;
+    width: 36px; height: 36px; margin: 4px 0 0;
+    border: 2px solid var(--line-strong); border-radius: 10px;
+    background: var(--surface); cursor: pointer;
+    display: grid; place-content: center;
+    transition: background .15s ease, border-color .15s ease, transform .1s ease;
+  }
+  .step-check:hover { border-color: var(--accent); }
+  .step-check:active { transform: scale(.94); }
+  .step-check::after {
+    content: ""; width: 9px; height: 17px; margin-top: -3px;
+    border: solid #fff; border-width: 0 3px 3px 0; transform: rotate(45deg) scale(0);
+    transition: transform .15s ease;
+  }
+  .step-check:checked { background: var(--accent); border-color: var(--accent); }
+  .step-check:checked::after { transform: rotate(45deg) scale(1); }
+
+  .step-body {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 18px 16px; margin: 0 0 14px; min-width: 0;
+    transition: opacity .2s ease;
+  }
+  .step-title { display: block; cursor: pointer; font-weight: 650; font-size: 1.06rem; line-height: 1.35; }
+  .step-num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
+  .phase[data-phase="1"] .step-num::before { content: "1." counter(step); }
+  .phase[data-phase="2"] .step-num::before { content: "2." counter(step); }
+  .step-body p { margin: 8px 0 0; }
+  .step-body p.done-when {
+    margin-top: 12px; padding: 8px 12px; border-radius: 8px;
+    background: var(--accent-soft); font-size: .93rem;
+  }
+  .step-body p.note { color: var(--muted); font-size: .92rem; }
+  .step.is-done .step-body { opacity: .7; }
+  .step.is-done .step-title { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  .step.is-done:hover .step-body, .step.is-done:focus-within .step-body { opacity: 1; }
+  body.hide-done .step.is-done { display: none; }
+
+  .tag {
+    display: inline-block; vertical-align: 2px; margin-left: 6px;
+    font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .tag.build { color: var(--p2); }
+  .tag.money { color: var(--warn-ink); background: var(--warn-bg); border-color: transparent; }
+  .tag.live { color: var(--muted); }
+
+  /* ── Commands ────────────────────────────────────────────────────────── */
+  .cmd { position: relative; margin: 10px 0 0; }
+  .cmd pre {
+    margin: 0; padding: 12px 74px 12px 14px; overflow-x: auto;
+    background: var(--code-bg); color: var(--code-ink);
+    border: 1px solid var(--code-line); border-radius: 9px;
+    font: .86rem/1.55 var(--mono); tab-size: 4;
+  }
+  .cmd pre code { font: inherit; background: none; padding: 0; }
+  .copy {
+    position: absolute; top: 7px; right: 7px;
+    font: 600 .72rem var(--sans); letter-spacing: .04em; text-transform: uppercase;
+    color: var(--code-ink); background: #24364a; border: 1px solid #3a5069;
+    border-radius: 6px; padding: 4px 9px; cursor: pointer;
+  }
+  .copy:hover { background: #2f4660; }
+  .copy.ok { background: #1f6f5c; border-color: #2c917a; }
+
+  details { margin: 10px 0 0; }
+  summary { cursor: pointer; color: var(--muted); font-size: .92rem; }
+  details[open] summary { margin-bottom: 4px; }
+
+  .help { margin: 26px 0 0 52px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .help h3 { margin: 0 0 6px; font-size: 1rem; }
+  .help dl { margin: 0; font-size: .93rem; }
+  .help dt { font-weight: 650; margin-top: 10px; }
+  .help dd { margin: 2px 0 0; color: var(--muted); }
+
+  footer { margin: 60px 0 40px; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding-top: 16px; }
+  .save-warning { display: none; color: var(--warn-ink); background: var(--warn-bg); padding: 2px 8px; border-radius: 6px; }
+  .save-warning.show { display: inline-block; }
+
+  @media (max-width: 560px) {
+    .step { grid-template-columns: 44px minmax(0, 1fr); }
+    .step::before { left: 15px; }
+    .step-check { width: 32px; height: 32px; }
+    h3.group, .help { margin-left: 0; }
+    .step-body { padding: 12px 14px 14px; }
+    .topbar .name { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; scroll-behavior: auto !important; }
+  }
+  @media print {
+    .topbar, .copy, .tools { display: none !important; }
+    body { background: #fff; color: #000; }
+    .step-body, .status .card, .help { break-inside: avoid; border-color: #999; }
+    .cmd pre { white-space: pre-wrap; background: #f3f3f3; color: #000; border-color: #999; padding-right: 14px; }
+    .step.is-done .step-body { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <span class="name">Tarshish roadmap</span>
+    <div class="meter" data-meter="all" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+    <span class="count" data-count="all" aria-live="polite">0 of 0 steps</span>
+    <div class="tools">
+      <label><input type="checkbox" id="hide-done"> Hide completed</label>
+      <button class="btn" id="reset" type="button">Reset</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="kicker">Tarshish Engine · setup roadmap</div>
+    <h1>From a fresh checkout to a running PoC, then to a product.</h1>
+    <p class="lede">Tick each step as you finish it. Every step ends with a check you can run, so a tick means
+      "I saw it work", not "I think I did it". Your ticks are saved in this browser.
+      <span class="save-warning" id="save-warning">This browser is not saving progress for local files.</span></p>
+    <p class="notice"><strong>Run every command from the <code>tarshish_engine</code> folder</strong> with the virtual
+      environment active. Commands are written for Windows PowerShell; where Linux or macOS differs, the alternative is shown.</p>
+  </header>
+
+  <section class="status" aria-label="Where the project stands">
+    <div class="card">
+      <h3>✅ Working and tested</h3>
+      <ul>
+        <li>Engine core, CLI and SQLite store</li>
+        <li>Mock product source (3 products)</li>
+        <li>Offline Hebrew / English captions</li>
+        <li>Console publisher, queue and worker</li>
+        <li>Streamlit dashboard</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🔌 Built, not yet run live</h3>
+      <ul>
+        <li>Claude and Gemini captions</li>
+        <li>Telegram publisher</li>
+      </ul>
+      <p style="margin:8px 0 0;font-size:.86rem;color:var(--muted)">Tested against stand-ins only. Phase 2 is their first contact with the real services.</p>
+    </div>
+    <div class="card">
+      <h3>🧱 Stubs to implement</h3>
+      <ul>
+        <li>Video rendering</li>
+        <li>Cloud media storage</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>➕ Not built yet</h3>
+      <ul>
+        <li>Real product sources</li>
+        <li>TikTok, Instagram, YouTube publishers</li>
+        <li>Automatic metrics collection</li>
+        <li>Dashboard login</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ PHASE 1 ═══════════════════════════ -->
+  <section class="phase" data-phase="1" id="phase-1">
+    <div class="phase-head">
+      <div class="kicker">Phase 1</div>
+      <h2>Getting the PoC Running</h2>
+      <p class="phase-intro">Everything here runs offline: no API keys, no accounts, no cost. Allow about twenty minutes,
+        most of it waiting for packages to install.</p>
+      <div class="phase-progress">
+        <div class="meter" data-meter="1"><span></span></div>
+        <span class="count" data-count="1">0 of 0</span>
+      </div>
+    </div>
+
+    <ol class="steps">
+      <li class="step" data-step="p1-terminal">
+        <input class="step-check" type="checkbox" id="cb-p1-terminal">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-terminal"><span class="step-num"></span> Open a terminal in the project folder</label>
+          <p>From the repository root, move into the engine folder and confirm which Python you have.</p>
+          <div class="cmd"><pre><code>cd tarshish_engine
+python --version</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> Python reports 3.14 or 3.15, the versions the project is
+            tested on. Anything from 3.11 should work but is untested.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-venv">
+        <input class="step-check" type="checkbox" id="cb-p1-venv">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-venv"><span class="step-num"></span> Create a fresh virtual environment</label>
+          <p><code>--clear</code> wipes any old environment first. That matters: an environment breaks when the folder
+            is moved or Python is upgraded, and this project has been through both.</p>
+          <div class="cmd"><pre><code>python -m venv --clear .venv
+.venv\Scripts\Activate.ps1</code></pre></div>
+          <p class="note">Linux / macOS: <code>source .venv/bin/activate</code>. If PowerShell refuses to run the
+            activation script, run <code>Set-ExecutionPolicy -Scope CurrentUser RemoteSigned</code> once.</p>
+          <p class="done-when"><strong>Done when:</strong> your prompt starts with <code>(.venv)</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-install">
+        <input class="step-check" type="checkbox" id="cb-p1-install">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-install"><span class="step-num"></span> Install the dependencies</label>
+          <p>This file includes the runtime packages plus <code>pytest</code> for the next step.</p>
+          <div class="cmd"><pre><code>pip install -r requirements-dev.txt</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> pip finishes with "Successfully installed" and no red error lines.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-tests">
+        <input class="step-check" type="checkbox" id="cb-p1-tests">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-tests"><span class="step-num"></span> Run the test suite</label>
+          <p>The quickest proof that the install is healthy. The first run takes a minute or two while Python compiles
+            the libraries; later runs take seconds.</p>
+          <div class="cmd"><pre><code>python -m pytest tests -q</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the last line reads <code>… passed</code> with no failures.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-env">
+        <input class="step-check" type="checkbox" id="cb-p1-env">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-env"><span class="step-num"></span> Create your <code>.env</code> file</label>
+          <p>Skip the copy if <code>.env</code> already exists. Leave every key empty for now: the PoC needs none.
+            The file is git-ignored, so secrets you add later stay off GitHub.</p>
+          <div class="cmd"><pre><code>Copy-Item .env.example .env</code></pre></div>
+          <p class="note">Linux / macOS: <code>cp .env.example .env</code></p>
+          <p class="done-when"><strong>Done when:</strong> <code>.env</code> sits next to <code>main.py</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-db">
+        <input class="step-check" type="checkbox" id="cb-p1-db">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-db"><span class="step-num"></span> Create and seed the database</label>
+          <p>There is no separate migration command. The first start creates <code>tarshish_engine.db</code> and copies
+            the pipelines from <code>config/pipelines.yaml</code> into it. From then on the database is the source of truth.</p>
+          <div class="cmd"><pre><code>python main.py --list-pipelines</code></pre></div>
+          <p class="note">Edited the YAML later? Push it into the database with <code>python main.py --sync-config</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> the list shows <code>sports_he</code> as enabled and the
+            <code>.db</code> file exists.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-dryrun">
+        <input class="step-check" type="checkbox" id="cb-p1-dryrun">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-dryrun"><span class="step-num"></span> Run the dry-run</label>
+          <p>Simulates the whole pipeline and prints the posts. Nothing is published, no AI is billed, nothing is written
+            to the database.</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --dry-run</code></pre></div>
+          <p class="note">A warning that the Telegram target is skipped is expected: its credentials come in Phase 2.</p>
+          <p class="done-when"><strong>Done when:</strong> you see three <code>DRY-RUN PREVIEW</code> cards with Hebrew
+            captions and a summary line ending in <code>failed 0</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-live-console">
+        <input class="step-check" type="checkbox" id="cb-p1-live-console">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-live-console"><span class="step-num"></span> Publish for real, to the console</label>
+          <p>A live run, but the only working target is your own terminal. This one does write to the database.</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1
+python main.py --stats</code></pre></div>
+          <p class="note">Run it again and you get the next product: nothing is posted twice. <code>--force</code> overrides that.</p>
+          <p class="done-when"><strong>Done when:</strong> the stats show <code>Published : 1</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-dashboard">
+        <input class="step-check" type="checkbox" id="cb-p1-dashboard">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-dashboard"><span class="step-num"></span> Launch the dashboard</label>
+          <p>Leave it running in its own terminal and open a second terminal for the remaining steps.</p>
+          <div class="cmd"><pre><code>streamlit run dashboard/app.py</code></pre></div>
+          <p class="note">If the <code>streamlit</code> command is not found, use <code>python -m streamlit run dashboard/app.py</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> shows the
+            <code>sports_he</code> flow card, the "Run Pipeline Now (Dry-Run)" button returns three captions, and
+            the Queue &amp; Logs tab lists the post from the previous step.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-queue">
+        <input class="step-check" type="checkbox" id="cb-p1-queue">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-queue"><span class="step-num"></span> Try the queue and the worker</label>
+          <p>Production pacing puts 10 to 45 minutes between posts. For a quick demo, set these four values in
+            <code>.env</code>:</p>
+          <div class="cmd"><pre><code>WORKER_ACTIVE_HOURS_START=0
+WORKER_ACTIVE_HOURS_END=24
+WORKER_MIN_DELAY_SECONDS=5
+WORKER_MAX_DELAY_SECONDS=15</code></pre></div>
+          <p>Then queue the remaining products and start the worker. Stop it with <kbd>Ctrl</kbd>+<kbd>C</kbd>.</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode queued
+python main.py --mode worker</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the worker prints the queued posts a few seconds apart and
+            <code>python main.py --stats</code> shows an empty queue. Afterwards restore the four values
+            (<code>9</code>, <code>22</code>, <code>600</code>, <code>2700</code>).</p>
+        </div>
+      </li>
+    </ol>
+
+    <div class="help">
+      <h3>If something goes wrong in Phase 1</h3>
+      <dl>
+        <dt><code>[ENVIRONMENT ERROR]</code> or an <code>ImportError</code></dt>
+        <dd>The environment does not match your Python. Repeat steps 1.2 and 1.3.</dd>
+        <dt><code>[CONFIG ERROR]</code></dt>
+        <dd>The message names the exact variable in <code>.env</code> or field in <code>pipelines.yaml</code> that is invalid. Fix it and rerun.</dd>
+        <dt>The dry-run says <code>skipped 3</code> and shows no cards</dt>
+        <dd>Those products were already published. Add <code>--force</code> to preview them anyway.</dd>
+        <dt>Hebrew looks reversed in the terminal</dt>
+        <dd>Most terminals do not render right-to-left text. The text itself is correct; check it in the dashboard.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ PHASE 2 ═══════════════════════════ -->
+  <section class="phase" data-phase="2" id="phase-2">
+    <div class="phase-head">
+      <div class="kicker">Phase 2</div>
+      <h2>Scaling to Production Product</h2>
+      <p class="phase-intro">From here on, steps cost money, touch real accounts, or need code that does not exist yet.
+        Work through the four groups in order.</p>
+      <div class="phase-progress">
+        <div class="meter" data-meter="2"><span></span></div>
+        <span class="count" data-count="2">0 of 0</span>
+      </div>
+    </div>
+
+    <h3 class="group">A · Real AI captions</h3>
+    <ol class="steps">
+      <li class="step" data-step="p2-api-key">
+        <input class="step-check" type="checkbox" id="cb-p2-api-key">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-api-key"><span class="step-num"></span> Add an API key</label>
+          <p>Put an Anthropic key, a Gemini key, or both in <code>.env</code>. Keys belong only there: never in the YAML
+            file or the dashboard, which store variable <em>names</em> only.</p>
+          <div class="cmd"><pre><code>ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=...</code></pre></div>
+          <p>Confirm the key is picked up without spending anything:</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --dry-run --force</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the <code>Content</code> line of each card reads
+            <code>offline-template [dry-run stand-in for claude-opus-5-5]</code> instead of "not set".</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-model-budget">
+        <input class="step-check" type="checkbox" id="cb-p2-model-budget">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-model-budget"><span class="step-num"></span> Choose the model and the monthly cap</label>
+          <p>In the dashboard open Pipelines, pick <code>sports_he</code> in "Create / edit pipeline" and set
+            <strong>LLM model</strong>. The default is <code>claude-opus-5-5</code>. Cheaper choices:
+            <code>claude-sonnet-5-5</code>, <code>claude-haiku-5-5</code>, <code>gemini-3.5-flash-lite</code>.
+            Then set the spending cap in <code>.env</code>:</p>
+          <div class="cmd"><pre><code>MAX_MONTHLY_AI_BUDGET_USD=5.0</code></pre></div>
+          <p class="note">When the month's spend reaches the cap, every run that needs a paid model stops with exit code 3.</p>
+          <p class="done-when"><strong>Done when:</strong> the pipeline card shows the model you chose.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-first-caption">
+        <input class="step-check" type="checkbox" id="cb-p2-first-caption">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-first-caption"><span class="step-num"></span> Generate the first paid caption
+            <span class="tag money">costs money</span><span class="tag live">first live call</span></label>
+          <p>One product, one request. This is the first time the AI integration talks to the real service, so read
+            the result carefully.</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1 --force
+python main.py --stats</code></pre></div>
+          <p class="note">If the request is rejected, the error line names the HTTP status. A 401 means the key is wrong;
+            a 404 means the model id is not available to your account.</p>
+          <p class="done-when"><strong>Done when:</strong> the caption is natural Hebrew rather than the template,
+            the summary shows an <code>AI cost</code> above $0, and the stats show the same amount as monthly spend.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">B · Real publishers</h3>
+    <ol class="steps">
+      <li class="step" data-step="p2-telegram-bot">
+        <input class="step-check" type="checkbox" id="cb-p2-telegram-bot">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-telegram-bot"><span class="step-num"></span> Create a Telegram bot and a test channel</label>
+          <p>In Telegram, message <code>@BotFather</code>, send <code>/newbot</code> and keep the token it gives you.
+            Create a <strong>private test channel</strong>, then add the bot to it as an administrator with permission
+            to post messages.</p>
+          <p class="done-when"><strong>Done when:</strong> you hold a bot token and the bot is listed among the channel's administrators.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-telegram-env">
+        <input class="step-check" type="checkbox" id="cb-p2-telegram-env">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-telegram-env"><span class="step-num"></span> Wire the Telegram credentials</label>
+          <p>Add both values to <code>.env</code>. The chat id is <code>@channelname</code> for a public channel or the
+            numeric id (it starts with <code>-100</code>) for a private one.</p>
+          <div class="cmd"><pre><code>TG_SPORTS_BOT_TOKEN=123456789:AA...
+TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
+          <p>In the dashboard, edit the pipeline's social page and replace the placeholder name
+            <code>@my_sports_channel</code> with your real channel name. Do it <strong>before the first post</strong>:
+            the engine treats a renamed page as a new page and would post everything to it again.</p>
+          <p class="note">Restart the dashboard after editing <code>.env</code>; it reads the file at startup.</p>
+          <p class="done-when"><strong>Done when:</strong> a dry-run prints no "skipped" warning for Telegram and the
+            dashboard card shows the Telegram page as <code>✅ ready</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-telegram-post">
+        <input class="step-check" type="checkbox" id="cb-p2-telegram-post">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-telegram-post"><span class="step-num"></span> Send the first real post
+            <span class="tag live">first live call</span></label>
+          <p>Products already shown on the console are sent to the new Telegram page only; nothing is repeated on the console.</p>
+          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1</code></pre></div>
+          <p class="note">The mock products carry placeholder images and fake affiliate links. Keep this channel private
+            until a real product source is in place.</p>
+          <p class="done-when"><strong>Done when:</strong> the post appears in your channel with a photo, the caption,
+            the link, hashtags and the affiliate-disclosure line.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-real-source">
+        <input class="step-check" type="checkbox" id="cb-p2-real-source">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-real-source"><span class="step-num"></span> Replace the mock source with a real product feed
+            <span class="tag build">needs building</span></label>
+          <p>Write <code>plugins/sources/&lt;name&gt;.py</code> with one class that extends <code>BaseSource</code> and
+            returns <code>Product</code> objects carrying your real affiliate links (AliExpress Affiliate API, Amazon,
+            Admitad). Use <code>aliexpress_mock.py</code> as the template. Then pick the new plugin under
+            <strong>Source plugin</strong> in the dashboard. Nothing in <code>core/</code> changes.</p>
+          <p class="done-when"><strong>Done when:</strong> a dry-run previews real products with working links.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-tiktok">
+        <input class="step-check" type="checkbox" id="cb-p2-tiktok">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-tiktok"><span class="step-num"></span> Add TikTok and other video platforms
+            <span class="tag build">needs building</span></label>
+          <p>Video platforms need three pieces that are not written yet:</p>
+          <p>1. A publisher: <code>plugins/publishers/tiktok_pub.py</code> extending <code>BasePublisher</code>, declaring
+            its <code>required_credentials</code> and <code>default_env_vars</code>.<br>
+            2. Real rendering: implement <code>_render</code> in <code>plugins/generators/video_gen_stub.py</code> (FFmpeg or MoviePy).<br>
+            3. Public media hosting: implement <code>storage/cloud_storage_stub.py</code> and set <code>STORAGE_MODE=cloud</code>.</p>
+          <p class="note">TikTok's posting API requires an approved developer app. Start that application early; approval takes time.</p>
+          <p class="done-when"><strong>Done when:</strong> a dry-run of a pipeline that uses the new plugins shows its page as ready.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-queued-mode">
+        <input class="step-check" type="checkbox" id="cb-p2-queued-mode">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-queued-mode"><span class="step-num"></span> Switch to queued publishing with human pacing</label>
+          <p>In the dashboard set the pipeline's <strong>Publishing mode</strong> to <code>queued</code>. Confirm
+            <code>.env</code> holds production pacing and your audience's timezone:</p>
+          <div class="cmd"><pre><code>WORKER_TIMEZONE=Asia/Jerusalem
+WORKER_ACTIVE_HOURS_START=9
+WORKER_ACTIVE_HOURS_END=22
+WORKER_MIN_DELAY_SECONDS=600
+WORKER_MAX_DELAY_SECONDS=2700</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> a run reports its items as <code>queued</code>, each with a
+            scheduled time inside the active hours.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">C · Background operations</h3>
+    <ol class="steps">
+      <li class="step" data-step="p2-server">
+        <input class="step-check" type="checkbox" id="cb-p2-server">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-server"><span class="step-num"></span> Prepare an always-on machine</label>
+          <p>A small Linux server is enough. Clone the repository, build the environment, and bring <code>.env</code>
+            over a secure channel (never through git).</p>
+          <div class="cmd"><pre><code>git clone &lt;your-repo-url&gt; /opt/tarshish
+cd /opt/tarshish/tarshish_engine
+python3 -m venv --clear .venv
+.venv/bin/pip install -r requirements.txt
+chmod 600 .env</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> <code>.venv/bin/python main.py --stats</code> runs on the server.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-systemd">
+        <input class="step-check" type="checkbox" id="cb-p2-systemd">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-systemd"><span class="step-num"></span> Run the worker as a systemd service</label>
+          <p>Save this as <code>/etc/systemd/system/tarshish-worker.service</code>, replacing the user name with the
+            account that owns the folder:</p>
+          <div class="cmd"><pre><code>[Unit]
+Description=Tarshish queue worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tarshish
+WorkingDirectory=/opt/tarshish/tarshish_engine
+ExecStart=/opt/tarshish/tarshish_engine/.venv/bin/python main.py --mode worker
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target</code></pre></div>
+          <div class="cmd"><pre><code>sudo systemctl daemon-reload
+sudo systemctl enable --now tarshish-worker
+systemctl status tarshish-worker</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the status is <code>active (running)</code> and
+            <code>logs/tarshish_engine.log</code> contains "Queue worker started".</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-cron">
+        <input class="step-check" type="checkbox" id="cb-p2-cron">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-cron"><span class="step-num"></span> Schedule content generation with cron</label>
+          <p>The worker only publishes; something has to fill the queue. Open <code>crontab -e</code> and add a line
+            that runs every enabled pipeline three times a day:</p>
+          <div class="cmd"><pre><code>0 8,13,18 * * * cd /opt/tarshish/tarshish_engine &amp;&amp; .venv/bin/python main.py --mode queued &gt;&gt; logs/cron.log 2&gt;&amp;1</code></pre></div>
+          <details>
+            <summary>Staying on Windows instead? Use Task Scheduler</summary>
+            <p class="note">Replace <code>C:\path\to</code> with the real folder. The first task fills the queue daily,
+              the second starts the worker when you log on.</p>
+            <div class="cmd"><pre><code>schtasks /Create /TN "Tarshish pipelines" /SC DAILY /ST 08:00 /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --mode queued"
+schtasks /Create /TN "Tarshish worker" /SC ONLOGON /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --mode worker"</code></pre></div>
+          </details>
+          <p class="done-when"><strong>Done when:</strong> after the next scheduled time, <code>logs/cron.log</code>
+            holds a run summary and <code>--stats</code> shows new items in the queue.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-dashboard-access">
+        <input class="step-check" type="checkbox" id="cb-p2-dashboard-access">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-dashboard-access"><span class="step-num"></span> Reach the dashboard safely</label>
+          <p><strong>The dashboard has no login.</strong> Anyone who can open it can edit pipelines and flush the queue,
+            so never expose its port to the internet. Bind it to the server itself and connect through an SSH tunnel:</p>
+          <div class="cmd"><pre><code>.venv/bin/streamlit run dashboard/app.py --server.address 127.0.0.1 --server.headless true</code></pre></div>
+          <div class="cmd"><pre><code>ssh -L 8501:127.0.0.1:8501 you@your-server</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> on your own computer shows
+            the server's dashboard, and the port is closed from outside.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-backup">
+        <input class="step-check" type="checkbox" id="cb-p2-backup">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-backup"><span class="step-num"></span> Back up the database and the secrets</label>
+          <p>The whole state is one SQLite file. Copy it with SQLite's own backup command, which is safe while the
+            worker is running, and schedule it nightly. Keep a copy of <code>.env</code> in a password manager.</p>
+          <div class="cmd"><pre><code>mkdir -p backups
+sqlite3 tarshish_engine.db ".backup 'backups/tarshish-$(date +%F).db'"</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> a dated backup file exists and you have restored one once to prove it opens.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">D · Monitoring and growth</h3>
+    <ol class="steps">
+      <li class="step" data-step="p2-daily-check">
+        <input class="step-check" type="checkbox" id="cb-p2-daily-check">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-daily-check"><span class="step-num"></span> Set a daily check routine</label>
+          <p>Open the dashboard's Queue &amp; Logs tab. For anything under <strong>Failed</strong>, read the error, fix
+            the cause, then use "Retry all failed". The same from a terminal:</p>
+          <div class="cmd"><pre><code>python main.py --stats
+python main.py --retry-failed</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> you have gone a week with the Failed count returning to zero each day.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-alerts">
+        <input class="step-check" type="checkbox" id="cb-p2-alerts">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-alerts"><span class="step-num"></span> Get told when a scheduled run fails</label>
+          <p>Every run ends with an exit code: <code>0</code> fine, <code>1</code> something failed, <code>2</code>
+            configuration error, <code>3</code> AI budget reached. Extend the cron line so a non-zero code reaches you,
+            for example by mail or a ping to an uptime service:</p>
+          <div class="cmd"><pre><code>... main.py --mode queued &gt;&gt; logs/cron.log 2&gt;&amp;1 || echo "Tarshish run failed" | mail -s "Tarshish alert" you@example.com</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> you have triggered a failure on purpose (set the budget to 0
+            for one run) and the alert arrived.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-metrics-manual">
+        <input class="step-check" type="checkbox" id="cb-p2-metrics-manual">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-metrics-manual"><span class="step-num"></span> Start recording performance numbers</label>
+          <p>Views, clicks, conversions and revenue are not collected automatically yet. Once a week, open the KPIs &amp;
+            Budget tab, expand "Record a metrics snapshot" and enter the running totals reported by Telegram and your
+            affiliate network for each post.</p>
+          <p class="done-when"><strong>Done when:</strong> the KPI tiles and the by-platform charts show real numbers.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-metrics-auto">
+        <input class="step-check" type="checkbox" id="cb-p2-metrics-auto">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-metrics-auto"><span class="step-num"></span> Automate metrics collection
+            <span class="tag build">needs building</span></label>
+          <p>Write a small scheduled script that pulls the numbers from your affiliate network's reports and stores
+            them with <code>Database.record_metrics_snapshot(publication_id, views=…, clicks=…, conversions=…, revenue_usd=…)</code>.
+            Values are running totals; the dashboard uses the latest snapshot of each post.</p>
+          <p class="done-when"><strong>Done when:</strong> the KPI numbers update without manual entry.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-monthly-review">
+        <input class="step-check" type="checkbox" id="cb-p2-monthly-review">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-monthly-review"><span class="step-num"></span> Review budget and profit every month</label>
+          <p>On the KPIs &amp; Budget tab compare <strong>Net profit</strong> with <strong>AI spend</strong> and look at
+            how full the budget meter got. If spend outruns revenue, move the pipeline to a cheaper model before raising the cap.</p>
+          <p class="done-when"><strong>Done when:</strong> you have made one model or budget decision based on a full month of numbers.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p2-next-pipeline">
+        <input class="step-check" type="checkbox" id="cb-p2-next-pipeline">
+        <div class="step-body">
+          <label class="step-title" for="cb-p2-next-pipeline"><span class="step-num"></span> Add the next pipeline</label>
+          <p>A new niche or language is configuration, not code. In the dashboard choose "Create a new pipeline", give
+            it its own id, niche, language and social page (with its own <code>.env</code> variable names), save, and
+            run its dry-run.</p>
+          <p class="done-when"><strong>Done when:</strong> two pipelines run side by side, each posting to its own page.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <footer>
+    Written for the repository as it stood on 16 November 2026. Command reference and architecture notes:
+    <code>tarshish_engine/README.md</code>.
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var KEY = "tarshish-setup-roadmap:v1";
+  var state = { done: {}, hideDone: false };
+
+  function load() {
+    try {
+      var saved = JSON.parse(window.localStorage.getItem(KEY) || "null");
+      if (saved && typeof saved === "object") {
+        state.done = saved.done && typeof saved.done === "object" ? saved.done : {};
+        state.hideDone = !!saved.hideDone;
+      }
+    } catch (error) { /* storage unavailable: the page still works for this visit */ }
+  }
+
+  function save() {
+    try {
+      window.localStorage.setItem(KEY, JSON.stringify(state));
+      return true;
+    } catch (error) {
+      document.getElementById("save-warning").classList.add("show");
+      return false;
+    }
+  }
+
+  var steps = Array.prototype.slice.call(document.querySelectorAll(".step"));
+  var phases = Array.prototype.slice.call(document.querySelectorAll(".phase"));
+  var hideToggle = document.getElementById("hide-done");
+  var resetButton = document.getElementById("reset");
+
+  function setMeter(name, done, total, label) {
+    var percent = total ? Math.round((done / total) * 100) : 0;
+    var meter = document.querySelector('[data-meter="' + name + '"]');
+    var count = document.querySelector('[data-count="' + name + '"]');
+    if (meter) {
+      meter.firstElementChild.style.width = percent + "%";
+      if (meter.hasAttribute("aria-valuenow")) { meter.setAttribute("aria-valuenow", String(percent)); }
+    }
+    if (count) { count.textContent = label(done, total, percent); }
+  }
+
+  function render() {
+    var doneAll = 0;
+    steps.forEach(function (step) {
+      var isDone = !!state.done[step.getAttribute("data-step")];
+      step.classList.toggle("is-done", isDone);
+      step.querySelector(".step-check").checked = isDone;
+      if (isDone) { doneAll += 1; }
+    });
+    phases.forEach(function (phase) {
+      var own = phase.querySelectorAll(".step");
+      var done = phase.querySelectorAll(".step.is-done").length;
+      phase.classList.toggle("is-complete", own.length > 0 && done === own.length);
+      setMeter(phase.getAttribute("data-phase"), done, own.length, function (d, t) { return d + " of " + t; });
+    });
+    setMeter("all", doneAll, steps.length, function (d, t, p) { return d + " of " + t + " steps · " + p + "%"; });
+    document.body.classList.toggle("hide-done", state.hideDone);
+    hideToggle.checked = state.hideDone;
+  }
+
+  steps.forEach(function (step) {
+    step.querySelector(".step-check").addEventListener("change", function (event) {
+      var id = step.getAttribute("data-step");
+      if (event.target.checked) { state.done[id] = true; } else { delete state.done[id]; }
+      save();
+      render();
+    });
+  });
+
+  hideToggle.addEventListener("change", function () {
+    state.hideDone = hideToggle.checked;
+    save();
+    render();
+  });
+
+  // Two clicks to reset, so a slip of the mouse cannot wipe the checklist.
+  var resetTimer = null;
+  resetButton.addEventListener("click", function () {
+    if (resetTimer) {
+      window.clearTimeout(resetTimer);
+      resetTimer = null;
+      resetButton.textContent = "Reset";
+      state.done = {};
+      save();
+      render();
+      return;
+    }
+    resetButton.textContent = "Click again to clear all ticks";
+    resetTimer = window.setTimeout(function () {
+      resetTimer = null;
+      resetButton.textContent = "Reset";
+    }, 4000);
+  });
+
+  // Copy buttons for every command block.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand("copy") ? resolve() : reject(new Error("copy rejected")); }
+      catch (error) { reject(error); }
+      finally { document.body.removeChild(area); }
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".cmd"), function (block) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "copy";
+    button.textContent = "Copy";
+    button.addEventListener("click", function () {
+      copyText(block.querySelector("code").textContent).then(function () {
+        button.textContent = "Copied";
+        button.classList.add("ok");
+      }, function () {
+        button.textContent = "Select & copy";
+      }).then(function () {
+        window.setTimeout(function () { button.textContent = "Copy"; button.classList.remove("ok"); }, 1600);
+      });
+    });
+    block.appendChild(button);
+  });
+
+  load();
+  render();
+})();
+</script>
+</body>
+</html>

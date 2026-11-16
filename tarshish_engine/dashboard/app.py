@@ -41,10 +41,13 @@ from dashboard.metrics_service import MetricsService  # noqa: E402
 TAB_PIPELINES, TAB_KPIS, TAB_QUEUE = "Pipelines", "KPIs & Budget", "Queue & Logs"
 _TAB_SLUGS = {"pipelines": TAB_PIPELINES, "kpis": TAB_KPIS, "queue": TAB_QUEUE}
 NEW_PIPELINE = "➕ Create a new pipeline"
+SELECT_NEXT = "_select_pipeline"  # pipeline to show in the form on the next draw (see render_pipeline_form)
 LANGUAGES = ["he", "en", "ar", "ru", "es", "fr", "de"]
+RTL_LANGUAGES = {"he", "ar", "fa", "ur"}
 
 # One series hue for every bar (categories are nominal), plus reserved status colors.
 SERIES_BLUE = {"light": "#2a78d6", "dark": "#3987e5"}
+LABEL_INK = "#898781"  # value labels at the bar tips: one muted tone that is legible on light and dark surfaces
 STATUS = {
     "ok": {"color": None, "icon": "✅", "label": "Within budget"},
     "warning": {"color": "#fab219", "icon": "⚠️", "label": "Over 70% of the budget used"},
@@ -66,7 +69,7 @@ st.markdown(
       .tsh-sub { font-size: .84rem; opacity: .82; line-height: 1.45; word-break: break-word; }
       .tsh-page { font-size: .88rem; line-height: 1.5; word-break: break-word; }
       .tsh-page small { opacity: .7; }
-      .tsh-caption { white-space: pre-wrap; unicode-bidi: plaintext; text-align: start; line-height: 1.5;
+      .tsh-caption { white-space: pre-wrap; text-align: start; line-height: 1.5;
                      border-inline-start: 3px solid rgba(128,128,128,.4); padding: 4px 12px; margin: 6px 0; }
       .tsh-meter-track { height: 12px; border-radius: 999px; overflow: hidden; }
       .tsh-meter-fill { height: 100%; border-radius: 999px; }
@@ -184,7 +187,9 @@ def run_dry_run(engine: Engine, pipeline_id: str) -> None:
         st.session_state[f"dryrun_{pipeline_id}"] = {"error": str(exc)}
 
 
-def render_dry_run_result(pipeline_id: str) -> None:
+def render_dry_run_result(pipeline: PipelineConfig) -> None:
+    pipeline_id = pipeline.id
+    direction = "rtl" if pipeline.language.split("-")[0] in RTL_LANGUAGES else "ltr"
     result = st.session_state.get(f"dryrun_{pipeline_id}")
     if not result:
         return
@@ -215,7 +220,7 @@ def render_dry_run_result(pipeline_id: str) -> None:
                     st.caption(f"ℹ️ {item.detail}")
                 tags = " ".join(f"#{tag}" for tag in item.hashtags)
                 st.markdown(
-                    f'<div class="tsh-caption" dir="auto">{esc(item.caption)}<br><br>{esc(tags)}</div>',
+                    f'<div class="tsh-caption" dir="{direction}">{esc(item.caption)}<br><br>{esc(tags)}</div>',
                     unsafe_allow_html=True,
                 )
         if result.get("console"):
@@ -237,9 +242,9 @@ def render_pipeline_card(engine: Engine, pipeline: PipelineConfig) -> None:
         if head[2].button("▶ Run Pipeline Now (Dry-Run)", key=f"run_{pipeline.id}", width="stretch"):
             run_dry_run(engine, pipeline.id)
         if head[3].button("Edit", key=f"edit_{pipeline.id}", width="stretch"):
-            st.session_state["form_pipeline"] = pipeline.id
+            st.session_state[SELECT_NEXT] = pipeline.id
         st.markdown(flow_html(engine, pipeline), unsafe_allow_html=True)
-        render_dry_run_result(pipeline.id)
+        render_dry_run_result(pipeline)
 
 
 def _social_pages_frame(pipeline: PipelineConfig | None) -> pd.DataFrame:
@@ -254,6 +259,9 @@ def _social_pages_frame(pipeline: PipelineConfig | None) -> pd.DataFrame:
 def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> None:
     st.subheader("Create / edit pipeline")
     by_id = {pipeline.id: pipeline for pipeline in pipelines}
+    requested = st.session_state.pop(SELECT_NEXT, None)
+    if requested is not None:  # set by "Edit", after a save, or after a delete
+        st.session_state["form_pipeline"] = requested
     if st.session_state.get("form_pipeline") not in (None, NEW_PIPELINE, *by_id):
         st.session_state["form_pipeline"] = NEW_PIPELINE
     selected = st.selectbox("Pipeline", [NEW_PIPELINE, *by_id], key="form_pipeline")
@@ -372,7 +380,7 @@ def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> Non
             if st.button("Yes, delete", key=f"delete_{current.id}", type="primary"):
                 try:
                     engine.registry.delete_pipeline(current.id)
-                    st.session_state.pop("form_pipeline", None)
+                    st.session_state[SELECT_NEXT] = NEW_PIPELINE
                     flash(f"Pipeline '{current.id}' deleted.")
                     st.rerun()
                 except TarshishError as exc:
@@ -403,7 +411,7 @@ def save_pipeline(engine: Engine, current: PipelineConfig | None, payload: dict[
     except TarshishError as exc:
         st.error(str(exc))
         return
-    st.session_state["form_pipeline"] = pipeline.id
+    st.session_state[SELECT_NEXT] = pipeline.id
     flash(f"Pipeline '{pipeline.id}' saved — it is live immediately.")
     st.rerun()
 
@@ -446,7 +454,10 @@ def budget_meter(budget: dict[str, Any]) -> None:
     )
 
 
-def ranked_bars(rows: list[dict[str, Any]], category: str, measure: str, title: str, number_format: str) -> None:
+def ranked_bars(
+    rows: list[dict[str, Any]], category: str, label: str, measure: str, title: str, number_format: str,
+    *, whole_numbers: bool = False,
+) -> None:
     """Horizontal bars, largest first, one hue — or a note when there is nothing to plot."""
     frame = pd.DataFrame(rows)[[category, measure]]
     if frame.empty or float(frame[measure].abs().sum()) == 0:
@@ -458,30 +469,35 @@ def ranked_bars(rows: list[dict[str, Any]], category: str, measure: str, title: 
     base = alt.Chart(frame).encode(
         y=alt.Y(f"{category}:N", sort="-x", title=None, axis=alt.Axis(labelLimit=170)),
         x=alt.X(
-            f"{measure}:Q", title=None, axis=alt.Axis(format=number_format, tickCount=4),
+            f"{measure}:Q", title=None,
+            axis=alt.Axis(format=number_format, tickCount=4, **({"tickMinStep": 1} if whole_numbers else {})),
             scale=alt.Scale(domain=[low * 1.2, max(top, 0.0) * 1.2 or 1.0]),  # headroom for the value label
         ),
-        tooltip=[alt.Tooltip(f"{category}:N", title=category.replace("_", " ")),
+        tooltip=[alt.Tooltip(f"{category}:N", title=label),
                  alt.Tooltip(f"{measure}:Q", title=title, format=number_format)],
     )
     bars = base.mark_bar(size=18, cornerRadiusEnd=4, color=SERIES_BLUE[theme_mode()])
-    labels = base.mark_text(align="left", baseline="middle", dx=6).encode(text=alt.Text(f"{measure}:Q", format=number_format))
-    chart = (bars + labels).properties(title=title, height=max(110, 34 * len(frame) + 46))
+    labels = base.mark_text(align="left", baseline="middle", dx=6, color=LABEL_INK).encode(
+        text=alt.Text(f"{measure}:Q", format=number_format)
+    )
+    # Streamlit fits the whole chart into this height, so it must cover the title and the
+    # x-axis band as well as one row per bar; otherwise the bars are squeezed on top of each other.
+    chart = (bars + labels).properties(title=title, height=34 * len(frame) + 96)
     st.altair_chart(chart, width="stretch")
 
 
-def breakdown(title: str, rows: list[dict[str, Any]], category: str, note: str) -> None:
+def breakdown(title: str, rows: list[dict[str, Any]], category: str, label: str, note: str) -> None:
     st.subheader(title)
     if not rows:
         st.info("Nothing has been generated yet.")
         return
     charts = st.columns(3)
     with charts[0]:
-        ranked_bars(rows, category, "published", "Published posts", ",.0f")
+        ranked_bars(rows, category, label, "published", "Published posts", ",.0f", whole_numbers=True)
     with charts[1]:
-        ranked_bars(rows, category, "clicks", "Clicks", ",.0f")
+        ranked_bars(rows, category, label, "clicks", "Clicks", ",.0f", whole_numbers=True)
     with charts[2]:
-        ranked_bars(rows, category, "revenue_usd", "Revenue (USD)", "$,.2f")
+        ranked_bars(rows, category, label, "revenue_usd", "Revenue (USD)", "$,.2f")
     columns = [category, "published", "queued", "failed", "views", "clicks", "conversions",
                "revenue_usd", "ai_spend_usd", "net_profit_usd"]
     st.dataframe(
@@ -489,7 +505,7 @@ def breakdown(title: str, rows: list[dict[str, Any]], category: str, note: str) 
         hide_index=True,
         width="stretch",
         column_config={
-            category: st.column_config.TextColumn(category.replace("_", " ").title()),
+            category: st.column_config.TextColumn(label),
             "published": "Published", "queued": "Queued", "failed": "Failed",
             "views": st.column_config.NumberColumn("Views", format="localized"),
             "clicks": st.column_config.NumberColumn("Clicks", format="localized"),
@@ -560,11 +576,11 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
     output[3].metric("Failed", compact(summary["failed"]), border=True)
 
     breakdown(
-        "By platform", metrics.get_metrics_by_platform(), "platform",
+        "By platform", metrics.get_metrics_by_platform(), "platform", "Platform",
         "AI spend per platform is the generation cost attributed to its publications.",
     )
     breakdown(
-        "By pipeline", metrics.get_metrics_by_pipeline(), "pipeline_id",
+        "By pipeline", metrics.get_metrics_by_pipeline(), "pipeline_id", "Pipeline",
         "AI spend per pipeline comes from the AI usage ledger (includes content that was later flushed).",
     )
     render_metrics_entry(engine)

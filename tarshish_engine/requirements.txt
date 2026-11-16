@@ -1,9 +1,9 @@
 # Core engine
 pydantic>=2.9,<3
 pydantic-settings>=2.6,<3
-PyYAML>=6.0.2
+ruamel.yaml>=0.18                    # pure-Python YAML: installs on new Python versions without a compiler
 python-dotenv>=1.0
-httpx>=0.27                          # Telegram publisher (sync + async)
+httpx>=0.27,<1                       # Telegram publisher (sync + async)
 tzdata>=2024.1; sys_platform == "win32"   # IANA timezones for the worker on Windows
 
 # LLM providers (optional at runtime: without API keys the offline templates are used)
@@ -11,6 +11,6 @@ anthropic>=2.8,<3
 google-genai>=3.0,<4
 
 # Admin & analytics dashboard
-streamlit>=1.50
+streamlit>=1.67,<2
 pandas>=2.2
 altair>=5.5

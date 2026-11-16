@@ -53,14 +53,14 @@ def bootstrap(
     environment variables or ``pipelines.yaml`` are invalid — callers should
     print it and exit instead of continuing in a half-configured state.
     """
-    from core.config import ENV_FILE, load_settings
+    from core.config import default_env_file, load_settings
     from core.database import Database
     from core.pipeline import PipelineOrchestrator
     from core.registry import PipelineRegistry, PluginRegistry
     from core.resilience import BudgetGuard, register_env_secrets, register_secret, setup_logging
 
     if settings is None:
-        settings = load_settings(env_file if env_file is not None else ENV_FILE)
+        settings = load_settings(env_file if env_file is not None else default_env_file())
 
     setup_logging(log_level or settings.log_level, settings.log_file, console=console_logging)
     register_env_secrets(os.environ)

@@ -24,6 +24,19 @@ _MARKS = {
 }
 
 
+_ENVIRONMENT_HELP = """
+[ENVIRONMENT ERROR] A required package could not be imported: {error}
+
+The virtual environment is missing dependencies, or it was built for a different
+Python than the one running now ({version}). This happens after upgrading Python
+or moving the project folder. Rebuild it from the project folder:
+
+    python -m venv --clear .venv
+    .venv\\Scripts\\activate          (Linux/macOS: source .venv/bin/activate)
+    pip install -r requirements.txt
+"""
+
+
 def _utf8_stdio() -> None:
     """Hebrew captions and box characters must not crash on legacy Windows code pages."""
     for stream in (sys.stdout, sys.stderr):
@@ -193,11 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.once and args.mode != "worker":
         parser.error("--once only applies to --mode worker")
 
-    from core import bootstrap
-    from core.resilience import ConfigError, TarshishError
-
     try:
+        from core import bootstrap
+        from core.resilience import ConfigError, TarshishError
+
         engine = bootstrap(log_level=args.log_level)
+    except ImportError as exc:
+        # Missing packages, or a virtualenv whose compiled packages belong to another Python.
+        print(_ENVIRONMENT_HELP.format(error=exc, version=sys.version.split()[0]), file=sys.stderr)
+        return EXIT_CONFIG
     except ConfigError as exc:
         # Startup validation failed: say exactly what is wrong and stop.
         print(f"\n[CONFIG ERROR] {exc}\n", file=sys.stderr)

@@ -23,10 +23,12 @@ _CREDENTIAL_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def clean_environment(monkeypatch):
+def clean_environment(monkeypatch, tmp_path):
     """No test may depend on (or leak) the developer's real credentials, and none really sleeps."""
     for name in _CREDENTIAL_VARS:
         monkeypatch.delenv(name, raising=False)
+    # Entry points that load `.env` themselves (CLI, dashboard) must not find the developer's file.
+    monkeypatch.setenv("TARSHISH_ENV_FILE", str(tmp_path / "no-such.env"))
     slept: list[float] = []
     monkeypatch.setattr(resilience, "_sleep", slept.append)
     yield slept

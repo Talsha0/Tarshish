@@ -1,26 +1,166 @@
+"""The Streamlit dashboard, driven through Streamlit's own test harness (no browser, no server)."""
+
+import json
 from pathlib import Path
 
 import pytest
 
 AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 
+from core.database import Database  # noqa: E402
+
 APP = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
+SAVE = "FormSubmitter:pipeline_form_new-Save pipeline"
 
 
-def test_dashboard_renders_every_tab_and_runs_a_dry_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "dashboard.db"))
+@pytest.fixture
+def dashboard(tmp_path, monkeypatch):
+    """A dashboard bound to its own empty database (seeded from pipelines.yaml on first run)."""
+    import streamlit as st
+
+    st.cache_resource.clear()  # the app caches its engine per process; each test needs a fresh one
+    database_path = tmp_path / "dashboard.db"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
     monkeypatch.setenv("LOG_FILE", str(tmp_path / "logs" / "dashboard.log"))
     monkeypatch.setenv("LOCAL_MEDIA_DIR", str(tmp_path / "media"))
-
+    monkeypatch.setenv("WORKER_ACTIVE_HOURS_START", "0")
+    monkeypatch.setenv("WORKER_ACTIVE_HOURS_END", "24")
     app = AppTest.from_file(str(APP), default_timeout=120).run()
+    yield app, Database(database_path)
+    st.cache_resource.clear()
+
+
+def test_dashboard_renders_every_tab_and_runs_a_dry_run(dashboard):
+    app, db = dashboard
 
     assert not app.exception
     assert [tab.label for tab in app.tabs][:3] == ["Pipelines", "KPIs & Budget", "Queue & Logs"]
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)
     assert any("Monthly AI spend" in header.value for header in app.subheader)
+    # Tab 1 flow card: [Input: source] ➔ [Generate: generator + model] ➔ [Output: publishers & pages]
+    card = next(block.value for block in app.markdown if 'class="tsh-flow"' in block.value)
+    for expected in ("aliexpress_mock", "llm_text_gen", "model anthropic", "console_pub", "telegram_pub", "TG_SPORTS_BOT_TOKEN"):
+        assert expected in card
 
     app.button(key="run_sports_he").click().run()
 
     assert not app.exception
     assert any("Dry-run result" in expander.label for expander in app.expander)
     assert any("לרכישה" in block.value or "הזמנות" in block.value for block in app.markdown)
+    assert sum(db.get_status_counts().values()) == 0  # a dry-run writes nothing
+
+
+def test_pipeline_form_validates_then_creates_a_pipeline_that_is_live_immediately(dashboard):
+    app, db = dashboard
+
+    app.text_input(key="f_id_new").set_value("Not A Valid ID!")
+    app.text_input(key="f_niche_new").set_value("smart_gadgets")
+    app.button(key=SAVE).click().run()
+    assert any("not valid" in error.value for error in app.error)
+    assert len(db.list_pipelines()) == 1  # nothing was saved
+
+    app.text_input(key="f_id_new").set_value("gadgets_he")
+    app.text_input(key="f_niche_new").set_value("smart_gadgets")
+    app.button(key=SAVE).click().run()
+
+    assert not app.exception and not app.error
+    row = db.get_pipeline("gadgets_he")
+    assert row["type"] == "smart_gadgets" and row["source_plugin"] == "aliexpress_mock" and row["enabled"] == 1
+    assert json.loads(row["social_pages_json"]) == [{"platform": "console_pub", "page_name": "default"}]
+    # No restart: the new pipeline already has its card and its own dry-run button.
+    assert any(button.key == "run_gadgets_he" for button in app.button)
+    app.button(key="run_gadgets_he").click().run()
+    assert not app.exception and any("Dry-run result" in expander.label for expander in app.expander)
+
+
+def test_editing_a_pipeline_keeps_its_social_pages_and_env_var_names(dashboard):
+    app, db = dashboard
+    before = json.loads(db.get_pipeline("sports_he")["social_pages_json"])
+    assert len(before) == 2
+
+    app.button(key="edit_sports_he").click().run()
+    assert app.selectbox(key="form_pipeline").value == "sports_he"  # the form switched to that pipeline
+    app.radio(key="f_mode_sports_he").set_value("queued")
+    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
+
+    assert not app.exception and not app.error
+    row = db.get_pipeline("sports_he")
+    assert row["publishing_mode"] == "queued"
+    assert json.loads(row["social_pages_json"]) == before  # incl. token_env_var / chat_id_env_var names
+
+
+def test_enable_toggle_updates_the_database(dashboard):
+    app, db = dashboard
+    assert db.get_pipeline("sports_he")["enabled"] == 1
+
+    app.toggle(key="enabled_sports_he").set_value(False).run()
+
+    assert not app.exception
+    assert db.get_pipeline("sports_he")["enabled"] == 0
+
+
+def test_queue_tab_retries_failed_items_and_flushes_the_queue(dashboard, capsys):
+    import main
+
+    app, db = dashboard
+    assert main.main(["--pipeline", "sports_he", "--mode", "queued"]) == 0  # same database, via the CLI
+    queued = db.list_publications(statuses=["QUEUED"])
+    assert len(queued) == 3
+    db.mark_failed(queued[0]["id"], "Telegram sendMessage failed (403): bot is not a member of the channel")
+    capsys.readouterr()
+
+    app.run()
+    assert any(tab.label == "Failed (1)" for tab in app.tabs) and any(tab.label == "Queued (2)" for tab in app.tabs)
+
+    next(button for button in app.button if button.label == "Retry all failed").click().run()
+    assert not app.exception
+    assert db.get_status_counts()["FAILED"] == 0 and db.get_status_counts()["QUEUED"] == 3
+
+    next(button for button in app.button if button.label == "Yes, flush the queue").click().run()
+    assert not app.exception
+    assert sum(db.get_status_counts().values()) == 0
+
+
+def test_worker_pass_button_and_manual_metrics_entry(dashboard, monkeypatch, capsys):
+    import main
+    import streamlit as st
+
+    app, db = dashboard
+    monkeypatch.setenv("WORKER_MIN_DELAY_SECONDS", "0")  # no pacing: everything queued is due at once
+    monkeypatch.setenv("WORKER_MAX_DELAY_SECONDS", "0")
+    st.cache_resource.clear()
+    assert main.main(["--pipeline", "sports_he", "--mode", "queued"]) == 0
+    app.run()
+
+    next(button for button in app.button if button.label == "Run a worker pass now").click().run()
+    capsys.readouterr()
+    assert not app.exception
+    assert db.get_status_counts()["PUBLISHED"] == 3 and db.get_status_counts()["QUEUED"] == 0
+
+    for label, value in (("Views", 1200), ("Clicks", 90), ("Conversions", 4), ("Revenue (USD)", 12.5)):
+        next(field for field in app.number_input if field.label == label).set_value(value)
+    app.button(key="FormSubmitter:metrics_snapshot-Save snapshot").click().run()
+
+    assert not app.exception
+    tiles = {metric.label: metric.value for metric in app.metric}
+    assert tiles["Total views"] == "1,200" and tiles["Clicks"] == "90" and tiles["Revenue (USD)"] == "$12.50"
+
+
+def test_delete_is_allowed_only_for_pipelines_without_history(dashboard, capsys):
+    import main
+
+    app, db = dashboard
+    app.text_input(key="f_id_new").set_value("scratch_en")
+    app.text_input(key="f_niche_new").set_value("scratch")
+    app.button(key=SAVE).click().run()
+    assert db.get_pipeline("scratch_en") is not None
+
+    app.button(key="delete_scratch_en").click().run()
+    assert not app.exception and db.get_pipeline("scratch_en") is None
+
+    assert main.main(["--pipeline", "sports_he", "--mode", "immediate", "--limit", "1"]) == 0
+    capsys.readouterr()
+    app.button(key="edit_sports_he").click().run()
+    app.button(key="delete_sports_he").click().run()
+    assert any("publication history" in error.value for error in app.error)
+    assert db.get_pipeline("sports_he") is not None

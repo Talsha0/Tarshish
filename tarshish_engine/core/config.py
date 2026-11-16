@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 from zoneinfo import ZoneInfo
 
-import yaml
 from dotenv import load_dotenv
 from pydantic import (
     AliasChoices,
@@ -27,6 +26,8 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 from core.resilience import ConfigError, looks_like_secret
 
@@ -130,6 +131,12 @@ class Settings(BaseSettings):
         """
         value = os.environ.get(name)
         return value.strip() if value and value.strip() else default
+
+
+def default_env_file() -> Path:
+    """The ``.env`` next to the project, unless ``TARSHISH_ENV_FILE`` names another file."""
+    override = os.environ.get("TARSHISH_ENV_FILE", "").strip()
+    return Path(override).expanduser() if override else ENV_FILE
 
 
 def load_settings(env_file: Path | str | None = ENV_FILE) -> Settings:
@@ -372,10 +379,12 @@ def load_pipelines_file(path: Path | str) -> list[PipelineConfig]:
     """Parse and validate ``pipelines.yaml``; raise :class:`ConfigError` on any problem."""
     path = Path(path)
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        # Safe loader (plain dicts/lists, no object construction); the pure-Python
+        # parser needs no compiled extension, so it installs on any Python version.
+        raw = YAML(typ="safe", pure=True).load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ConfigError(f"Pipeline configuration file not found: {path}") from exc
-    except yaml.YAMLError as exc:
+    except YAMLError as exc:
         raise ConfigError(f"Invalid YAML in {path}:\n  {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"Invalid pipeline configuration in {path}: expected a top-level 'pipelines:' list")

@@ -8,8 +8,11 @@ publishing destination never requires a change in `core/`.
 
 ## Quick start
 
+Python 3.14 or 3.15 (developed and tested on both; 3.11+ should work but is untested).
+Every dependency installs from a prebuilt or pure-Python wheel, so no compiler is needed.
+
 ```bash
-python -m venv .venv
+python -m venv --clear .venv
 .venv\Scripts\activate            # Windows  (Linux/macOS: source .venv/bin/activate)
 pip install -r requirements.txt
 copy .env.example .env            # optional: everything works offline without keys
@@ -19,6 +22,14 @@ python main.py --pipeline sports_he --mode immediate --dry-run
 
 With no API keys the engine uses the offline Hebrew/English template writer and
 the console publisher, so the command above works on a fresh checkout.
+
+A step-by-step checklist from first run to production is in
+[`../setup_roadmap.html`](../setup_roadmap.html) (open it in a browser).
+
+> **Rebuild `.venv` after moving the folder or upgrading Python.** A virtualenv
+> stores absolute paths and packages compiled for one Python version, so run the
+> first three commands again (`--clear` wipes the old environment first).
+> `python main.py` prints an `[ENVIRONMENT ERROR]` with these steps when it detects this.
 
 ## CLI
 
@@ -50,10 +61,13 @@ streamlit run dashboard/app.py
 3. **Queue & Logs** — queued / published / failed items, retry, flush, redacted log tail.
 
 Deep links: `?tab=kpis`, `?tab=queue`. Restart the dashboard after editing `.env`.
+If the `streamlit` command is blocked or not found, `python -m streamlit run dashboard/app.py` does the same.
+The dashboard has no login: keep it on `localhost` or behind a tunnel.
 
 ## Configuration
 
 * **`.env`** — secrets and settings, validated by Pydantic on startup (see `.env.example`).
+  Set `TARSHISH_ENV_FILE` to load a different file, for example on a server.
 * **`config/pipelines.yaml`** — seeds the `pipelines` table on first start. After that SQLite is the
   source of truth (edit in the dashboard); `--sync-config` pushes the file again.
 * **Secrets never enter the database or YAML.** A social page stores the *names* of the env vars:
@@ -120,3 +134,14 @@ SQLite (`tarshish_engine.db`) in WAL mode. Tables: `pipelines`, `products`, `pub
 pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
+
+The suite needs no network, API keys or `.env`. Every test gets its own temporary database.
+
+| File | Covers |
+|---|---|
+| `test_spec_contract.py` | The specified contract: model fields, plugin interfaces, schema, CLI flags, declared dependencies |
+| `test_pipeline.py` | Dry-run, publishing, de-duplication, fault isolation, budget halt, queue, worker pacing, KPIs |
+| `test_plugins.py` | Mock source, post formatting, Telegram (mocked transport), LLM request building and parsing |
+| `test_llm_sdk_integration.py` | The real Anthropic and Gemini SDK clients against a local stand-in server |
+| `test_config.py`, `test_resilience.py` | Startup validation, secret rejection, redaction, retries, budget guard |
+| `test_dashboard.py` | The Streamlit app renders every tab and runs a dry-run |
