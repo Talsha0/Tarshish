@@ -510,6 +510,64 @@ def save_pipeline(
     st.rerun()
 
 
+# Outcome of asking one Temu provider, as the chain card words it.
+_TEMU_OUTCOMES = {
+    "success": "✓ delivered", "missing_key": "✗ no API key", "quota_exhausted": "✗ quota used up (429)",
+    "auth_failed": "✗ key rejected (401/403)", "unavailable": "✗ unreachable / 5xx", "empty": "✗ no items",
+    "filtered_out": "✗ nothing passed the filter", "job_pending": "… search still running", "error": "✗ error",
+}
+
+
+def render_temu_provider_chain(engine: Engine) -> None:
+    """The Temu source's failover order, which API keys are present, and who answered last."""
+    try:
+        from plugins.sources.temu_providers import chain_status
+    except ImportError:  # the Temu source was removed: nothing to show
+        return
+
+    status = chain_status(engine.settings)
+    with st.container(border=True):
+        st.markdown("**Temu RapidAPI Provider Chain**")
+        if status["error"]:
+            st.error("The provider chain is not valid; the Temu source cannot fetch until it is fixed.")
+            st.code(redact(status["error"]), language=None)
+            return
+
+        last = status["last_run"] or {}
+        if not last:
+            st.caption("Tried top to bottom; the first provider with usable products wins. No live fetch has run yet.")
+        elif last.get("succeeded"):
+            st.caption(
+                f"Last run {local_time(engine, last.get('finished_at'))}: **{last['succeeded']}** delivered "
+                f"{last.get('usable', 0)} usable product(s) for “{last.get('keyword', '')}”."
+            )
+        else:
+            st.caption(
+                f"Last run {local_time(engine, last.get('finished_at'))}: no provider delivered products "
+                f"for “{last.get('keyword', '')}”."
+            )
+
+        rows = []
+        for provider in status["providers"]:
+            if not provider["enabled"]:
+                outcome = "switched off"
+            elif provider["last_outcome"]:
+                outcome = _TEMU_OUTCOMES.get(provider["last_outcome"], provider["last_outcome"])
+                if provider["last_outcome"] != "success" and provider["last_detail"]:
+                    outcome += f" — {provider['last_detail']}"
+            else:
+                outcome = "not reached" if last else ""
+            rows.append({**provider, "last": outcome})
+        html_table(
+            rows,
+            {"order": "#", "name": "Provider", "adapter": "Adapter", "host": "Host",
+             "api_key_env": "API key variable", "key_state": "Key in .env", "last": "Last run"},
+            numeric=("order",), clipped=("last",),
+        )
+        source = status["config_path"] if status["from_file"] else "built-in default (no temu_providers.yaml)"
+        st.caption(f"Order and endpoints: `{source}`. Keys are read from `.env`; restart the dashboard after changing it.")
+
+
 def render_pipelines_tab(engine: Engine) -> None:
     pipelines = engine.registry.list_pipelines()
     st.subheader("Pipeline architecture")
@@ -518,6 +576,8 @@ def render_pipelines_tab(engine: Engine) -> None:
         st.info("No pipelines yet — create the first one below.")
     for pipeline in pipelines:
         render_pipeline_card(engine, pipeline)
+    if any(pipeline.source == "temu_rapidapi" for pipeline in pipelines):
+        render_temu_provider_chain(engine)
     st.divider()
     render_pipeline_form(engine, pipelines)
 

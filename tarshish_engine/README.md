@@ -68,7 +68,7 @@ Then open <http://localhost:3000> (it redirects to the Hebrew storefront, `/he`)
 | `python main.py --retry-failed` | Put failed items back in the queue. |
 | `python main.py --list-pipelines` / `--sync-config` | List pipelines / upsert `config/pipelines.yaml` into the database. |
 | `python main.py --seed-storefront` | Load the 14-product demo catalogue into the storefront (an upsert; safe to repeat). |
-| `python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10` | Load real Temu products into the storefront: **one** RapidAPI search, no LLM calls. Prints inserted vs. skipped (duplicate) products. Add `--job ID` to collect an earlier search instead of starting one. |
+| `python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10` | Load real Temu products into the storefront through the provider chain (one search per provider asked), no LLM calls. Prints each provider's outcome and inserted vs. skipped (duplicate) products; exits 1 when no provider delivers. Add `--job ID` to collect an earlier background search instead of starting one. |
 
 Other flags: `--limit N`, `--force` (ignore de-duplication), `--log-level`.
 Omit `--pipeline` to run every enabled pipeline. Exit codes: `0` ok, `1` failures,
@@ -196,31 +196,64 @@ Anthropic request enables server-side refusal fallback (`fallbacks: "default"`) 
 
 ### Temu source (`temu_rapidapi`)
 
-Real Temu listings through the "Temu Product Scraper" API on RapidAPI. The plan meters **searches**
-(the free BASIC plan allows 5 per month), so the plugin starts **one search per pipeline run** (or per
-`--seed-temu`), asks for a batch of `TEMU_MAX_ITEMS` (20) and does the rest locally: the pipeline's
-`min_rating` / `min_orders`, ranking by rating and sales volume, and de-duplication on the store id and
-`canonical_hash`.
+Real Temu listings through RapidAPI. Free plans meter **searches** (5 to 50 a month) and any single
+endpoint can be out of quota, unsubscribed, down or empty, so the source walks an **ordered chain of
+providers** and stops at the first one that returns usable products. The providers behind it are not
+asked, which keeps their quota. Each provider gets one search per run: a batch of `TEMU_MAX_ITEMS` (20)
+that is filtered (`min_rating` / `min_orders`), ranked by rating and sales volume, and de-duplicated on
+the store id and `canonical_hash` locally.
 
-A search is a background job: the API answers with a job id, and the plugin waits and polls until the
-results are ready (up to `TEMU_JOB_TIMEOUT`, 300 seconds). If a job takes longer, the error names its
-id and `python main.py --seed-temu --category gadgets --job <id>` collects it later without starting a
-new search.
+A provider is skipped, with one structured warning in the log, when:
+
+| Situation | Outcome in logs, `--seed-temu` and the dashboard |
+|---|---|
+| Its API key variable is empty (and `RAPIDAPI_KEY` too) | `missing_key` — no request is made |
+| HTTP 429 | `quota_exhausted` — that key is not asked again on that API for the rest of the run |
+| HTTP 401 / 403 | `auth_failed` — wrong key, or the key is not subscribed to that API |
+| Timeout or 5xx after two quick retries | `unavailable` |
+| HTTP 200 with no items | `empty` |
+| Items, but none passes the quality filter | `filtered_out` |
+| A background search that outlives `TEMU_JOB_TIMEOUT` | `job_pending` — collect it later with `--job <id>` |
+
+When every provider fails, the source logs a summary, returns nothing, and `--seed-temu` exits with
+code 1. The dashboard's Pipelines tab shows the chain, which keys are present and which provider
+delivered last (**Temu RapidAPI Provider Chain**).
+
+**The chain is `config/temu_providers.yaml`**, read on every run (no `--sync-config`):
+
+| Provider | API | Free plan | Notes |
+|---|---|---|---|
+| `temu_primary_scraper` | [Temu Product Scraper](https://rapidapi.com/gioopasquale/api/temu-product-scraper) | 5 searches a month, 5 results each | No product photos. May answer with a background job, which the source waits for. |
+| `temu_secondary_scraper`, `temu_realtime_backup` | — | — | **Switched off**: their hosts did not exist on RapidAPI on 2026-11-17. The adapters are ready for an API with that schema. |
+| `temuscout` | [TemuScout API](https://rapidapi.com/dataocean/api/temuscout-api-temu-data-api) | 50 searches a month, 20–40 results each | Answers at once, with photos, list price and currency. Subscribe the key to it first; until then it answers 403 and is skipped at no cost. |
+
+Adapters live in `plugins/sources/temu_providers/`. `TemuProductScraperAdapter`, `TemuScraper2Adapter`
+and `TemuApiRealtimeAdapter` have fixed schemas. `adapter: generic` is described entirely in YAML —
+query parameters as templates, dotted paths to the item list and to each field — so **another RapidAPI
+Temu endpoint is a YAML entry, not a Python change** (`temuscout` is written that way; copy it).
+For more quota on one API, list it twice with two `api_key_env` names (two RapidAPI accounts).
 
 | Variable | Meaning |
 |---|---|
-| `RAPIDAPI_KEY` | Required for live requests. Masked as `[REDACTED]` in every log line. |
-| `RAPIDAPI_TEMU_HOST` | API host, default `temu-product-scraper.p.rapidapi.com`. |
+| `RAPIDAPI_KEY` | Used by every provider whose own variable is empty. One RapidAPI key works for all APIs the account is subscribed to. |
+| `RAPIDAPI_KEY_TEMU_1` … `_4` | Optional key per provider (the names come from `api_key_env` in the chain file). |
+| `TEMU_PROVIDERS_CONFIG_PATH` | The chain file, default `config/temu_providers.yaml`. Without the file only the first provider is used. |
+| `RAPIDAPI_TEMU_HOST` | Moves the first `TemuProductScraperAdapter` provider to another RapidAPI host. |
 | `TEMU_TRACKING_ID` | Your affiliate tracking value. Empty: links are plain product URLs and a warning is logged. |
 | `TEMU_AFFILIATE_URL_TEMPLATE` | Default `{url}?_x_sessn_id={tracking_id}&refer_page_name=affiliate`. |
-| `TEMU_MAX_ITEMS`, `TEMU_CURRENCY` | Batch size per search (20) and the currency of the reported prices (`USD`). |
-| `TEMU_JOB_TIMEOUT` | Seconds to wait for a search job to finish (300). |
+| `TEMU_MAX_ITEMS`, `TEMU_CURRENCY` | Batch size per search (20) and the currency for providers that report none (`USD`). |
+| `TEMU_JOB_TIMEOUT` | Seconds to wait for a background search to finish (300). |
+
+Every variable whose name contains `KEY` is masked as `[REDACTED]` in logs, and keys are sent to
+`*.rapidapi.com` hosts only (the chain file is rejected otherwise).
 
 Search terms are per pipeline, under `options.search_config`: `keyword` (default: the pipeline's
-category), `l2Category`, `priceMin`, `priceMax`, `maxItems`. Details worth knowing:
+category), `l1Category`, `l2Category`, `priceMin`, `priceMax`, `maxItems`. Each provider is sent the
+ones its API supports. Details worth knowing:
 
-* **A `--dry-run` spends no quota.** It previews the Temu products already stored for the category, so
-  run `--seed-temu` once first. Without stored products the preview is empty.
+* **A `--dry-run` spends no quota.** It previews the Temu products already stored for the category
+  (`--seed-temu` puts them there). Without stored products it previews mock stand-ins, so a pipeline
+  can be checked before any search is spent.
 * **Products the pipeline already posted are ranked last**, behind fresh ones, and the orchestrator skips
   them before any LLM call. `--force` and back-filling a newly added page therefore keep working. Set
   `skip_published: true` in `search_config` to drop them at the source instead.
@@ -306,7 +339,8 @@ The suite needs no network, API keys or `.env`. Every test gets its own temporar
 | `test_config.py`, `test_resilience.py` | Startup validation, secret rejection, redaction, retries, budget guard |
 | `test_dashboard.py` | The Streamlit app end to end: every tab, dry-run, the pipeline form, enable toggle, queue actions, storefront clicks, and rendering without `pyarrow` |
 | `test_storefront.py` | Schema migration, the seeder, search (typos, Hebrew), every API endpoint, click tracking, click metrics |
-| `test_temu_instagram.py` | Temu source (one request, local filtering, retries, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), the `gadgets_he` pipeline |
+| `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), the `gadgets_he` pipeline |
+| `test_temu_failover.py` | Temu provider chain: the 429 ➔ empty ➔ success failover, every failure mode, key fallback and exhausted-key memory, the four adapters, chain-file validation, key masking, the CLI summary |
 
 The storefront website is checked by its own build: `cd storefront && npm run build` fails on any
 TypeScript error.

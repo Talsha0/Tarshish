@@ -18,7 +18,7 @@ from core.resilience import ConfigError, NonRetryableError
 from plugins import is_placeholder_image, placeholder_image
 from plugins.generators.llm_text_gen import LLMTextGenerator
 from plugins.publishers.instagram_pub import InstagramPublisher
-from plugins.sources.temu_rapidapi import DEFAULT_HOST, TemuJobPending, TemuRapidApiSource, TemuSettings
+from plugins.sources.temu_rapidapi import DEFAULT_HOST, TemuRapidApiSource, TemuSettings
 
 KEY = "rapid0123456789abcdef0123456789abcdef"
 TOKEN = "EAAGm0PX4ZCpsBAtesttoken0123456789ZD"
@@ -122,9 +122,11 @@ def test_invalid_temu_settings_halt_before_any_request(engine, temu_api, monkeyp
     with pytest.raises(ConfigError, match="search_config"):
         temu(engine, options={"search_config": {"pricemax": 5}}).fetch_products("gadgets", 0, 0, 5)
 
+    # A missing key is not a configuration error: the provider is skipped and the fetch comes back empty.
     monkeypatch.delenv("RAPIDAPI_KEY")
-    with pytest.raises(ConfigError, match="RAPIDAPI_KEY"):
-        temu(engine).fetch_products("gadgets", 0, 0, 5)
+    assert temu(engine).fetch_products("gadgets", 0, 0, 5) == []
+    attempt = temu(engine).fetch_batch("gadgets").attempts[0]
+    assert attempt.outcome == "missing_key" and "RAPIDAPI_KEY_TEMU_1 or RAPIDAPI_KEY is not set" in attempt.detail
     assert not temu_api.requests
 
 
@@ -135,16 +137,21 @@ def test_temu_retries_transient_failures_and_never_leaks_the_key(engine, temu_ap
     assert len(temu_api.requests) == 2 and len(clean_environment) == 1  # one retry, one backoff sleep
     assert "Free tier: results are limited." in caplog.text  # the API notice reaches the debug log
 
-    for response, hint in [
-        (httpx.Response(403, json={"message": f"You are not subscribed to this API. key={KEY}"}), "RAPIDAPI_KEY"),
-        (httpx.Response(429, json={"message": "You have exceeded the MONTHLY quota for Requests"}), "quota"),
-        (httpx.Response(200, json={"success": False, "message": "keyword is required"}), "keyword is required"),
+    for response, outcome, hint in [
+        (httpx.Response(403, json={"message": f"You are not subscribed to this API. key={KEY}"}), "auth_failed", "subscribed"),
+        (httpx.Response(200, json={"success": False, "message": "keyword is required"}), "error", "keyword is required"),
+        (httpx.Response(429, json={"message": "You have exceeded the MONTHLY quota for Requests"}), "quota_exhausted", "quota"),
     ]:
         temu_api.requests.clear()
         temu_api.responses = [response]
-        with pytest.raises(NonRetryableError, match=hint) as excinfo:
-            temu(engine).fetch_products("gadgets", 4.5, 500, 5)
-        assert len(temu_api.requests) == 1 and KEY not in str(excinfo.value)  # no quota burnt on a hopeless retry
+        batch = temu(engine).fetch_batch("gadgets", 4.5, 500)
+        attempt = batch.attempts[0]
+        assert batch.provider is None and batch.products == [] and attempt.outcome == outcome and hint in attempt.detail
+        assert len(temu_api.requests) == 1 and KEY not in attempt.detail  # no quota burnt on a hopeless retry
+
+    # The key that answered 429 is not asked again for the rest of the run.
+    temu_api.requests.clear()
+    assert temu(engine).fetch_products("gadgets", 4.5, 500, 5) == [] and not temu_api.requests
     assert KEY not in caplog.text
 
 
@@ -168,8 +175,8 @@ def test_temu_follows_the_search_job_until_its_results_arrive(engine, temu_api, 
     monkeypatch.setenv("TEMU_JOB_TIMEOUT", "30")
     temu_api.requests.clear()
     temu_api.responses = [job("running") for _ in range(4)]
-    with pytest.raises(TemuJobPending, match="--job job-12345"):
-        temu(engine).fetch_products("gadgets", 4.5, 500, 5)
+    pending = temu(engine).fetch_batch("gadgets", 4.5, 500).attempts[0]
+    assert pending.outcome == "job_pending" and "--job job-12345" in pending.detail
     assert [request.url.path for request in temu_api.requests].count("/temu") == 1
 
     # …and is collected later by id, without starting (and paying for) a new search.
@@ -185,8 +192,8 @@ def test_temu_follows_the_search_job_until_its_results_arrive(engine, temu_api, 
         (httpx.Response(200, json={"success": True, "status": "done"}), "neither a 'results' list nor a running job"),
     ]:
         temu_api.responses = [reply]
-        with pytest.raises(NonRetryableError, match=reason):
-            temu(engine).fetch_products("gadgets", 4.5, 500, 5)
+        failed = temu(engine).fetch_batch("gadgets", 4.5, 500).attempts[0]
+        assert failed.outcome == "error" and reason in failed.detail
     with pytest.raises(ConfigError, match="not a Temu job id"):
         temu(engine).fetch_batch("gadgets", job_id="../admin")
 
@@ -230,7 +237,9 @@ def test_cli_seed_temu_prints_inserted_and_skipped(make_settings, monkeypatch, c
     assert "inserted 1 · skipped 2 duplicate" in capsys.readouterr().out
 
     monkeypatch.delenv("RAPIDAPI_KEY")
-    assert main.main(command) == 2 and "RAPIDAPI_KEY" in capsys.readouterr().err
+    assert main.main(command) == 1  # nothing delivered: a failure, with the reason per provider
+    failed = capsys.readouterr().out
+    assert "temu_primary_scraper" in failed and "missing_key" in failed and "RAPIDAPI_KEY" in failed
     with pytest.raises(SystemExit):
         main.main(["--seed-temu"])  # --category is required
     with pytest.raises(SystemExit):
@@ -399,16 +408,17 @@ def test_gadgets_pipeline_is_seeded_from_yaml(engine, temu_api):
     assert (config.llm_model, config.publishing_mode, config.enabled) == ("claude-sonnet-5-5", "queued", True)
     assert (config.filters.min_rating, config.filters.min_orders) == (4.5, 500)
     assert config.options["search_config"] == {
-        "keyword": "tech gadgets", "l2Category": "Electronics & Appliances", "priceMin": 1, "priceMax": 100,
+        "keyword": "tech gadgets", "l1Category": "Electronics & Appliances", "priceMin": 1, "priceMax": 100,
     }
     assert [page.key for page in config.social_pages] == [("console_pub", "default"), ("instagram_pub", "gadgets")]
     assert config.social_pages[1].env_refs() == {
         "token": "INSTAGRAM_ACCESS_TOKEN", "account_id": "INSTAGRAM_BUSINESS_ACCOUNT_ID",
     }
 
-    # Nothing stored yet: the dry-run is empty, clean and free.
+    # Nothing stored yet: the dry-run previews mock stand-ins, clean and free.
     preview = engine.orchestrator.run("gadgets_he", dry_run=True)
-    assert preview.ok and preview.fetched == 0 and not temu_api.requests
+    assert preview.ok and preview.count("preview") >= 1 and not temu_api.requests
+    assert engine.db.query("SELECT COUNT(*) AS n FROM products")[0]["n"] == 0  # and nothing was written
 
 
 def test_gadgets_pipeline_queues_fresh_products_first(engine, temu_api):

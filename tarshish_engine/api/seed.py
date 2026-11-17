@@ -9,7 +9,8 @@ a pipeline already stored keep their ids, publications and click history.
 
     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
 
-Loads real Temu products through the ``temu_rapidapi`` source (see ``seed_temu``).
+Loads real Temu products through the ``temu_rapidapi`` source and its provider chain
+(see ``seed_temu``).
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ def seed_storefront(db: Database) -> int:
 
 @dataclass
 class TemuSeedReport:
-    """Outcome of one ``--seed-temu`` run (exactly one search)."""
+    """Outcome of one ``--seed-temu`` run (one search per provider that had to be asked)."""
 
     category: str
     keyword: str
@@ -51,6 +52,8 @@ class TemuSeedReport:
     over_limit: list[Product] = field(default_factory=list)      # usable, but beyond --limit
     rejected: list[tuple[str, str]] = field(default_factory=list)  # (item, reason)
     notice: str | None = None
+    provider: str | None = None                                  # the provider that delivered; None = all failed
+    attempts: list[Any] = field(default_factory=list)            # ProviderAttempt per provider asked, in order
 
 
 def _standard(engine: "Engine", name: str, default: float) -> float:
@@ -63,11 +66,12 @@ def _standard(engine: "Engine", name: str, default: float) -> float:
 def seed_temu(
     engine: "Engine", *, category: str, keyword: str | None = None, limit: int = 10, job_id: str | None = None,
 ) -> TemuSeedReport:
-    """Load real Temu products into the storefront with one search and no LLM call.
+    """Load real Temu products into the storefront: no LLM call, one search per provider asked.
 
         python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
 
-    The batch is filtered against the storefront's listing standard, ranked by rating and
+    The source walks its provider chain and stops at the first provider that delivers usable
+    products. That batch is filtered against the storefront's listing standard, ranked by rating and
     sales, and the best ``limit`` products that SQLite does not hold yet are inserted
     under ``category``. Products already stored (same store id, or the same item from
     another source) are reported as duplicates and left as they are. ``job_id`` collects
@@ -83,6 +87,7 @@ def seed_temu(
     report = TemuSeedReport(
         category=category, keyword=batch.keyword, received=batch.received, min_rating=min_rating,
         min_orders=min_orders, rejected=list(batch.rejected), notice=batch.notice,
+        provider=batch.provider, attempts=list(batch.attempts),
     )
     known = source.stored_refs(batch.products)
     for product in batch.products:

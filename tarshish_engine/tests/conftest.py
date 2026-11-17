@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from core import bootstrap  # noqa: E402
 from core import resilience  # noqa: E402
 from core.config import Settings  # noqa: E402
+from plugins.sources import temu_providers  # noqa: E402
 
 _CREDENTIAL_VARS = (
     "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "TG_SPORTS_BOT_TOKEN", "TG_SPORTS_CHAT_ID",
@@ -22,6 +23,7 @@ _CREDENTIAL_VARS = (
     "STOREFRONT_ORIGINS", "STOREFRONT_MIN_RATING", "STOREFRONT_MIN_ORDERS",
     "RAPIDAPI_KEY", "RAPIDAPI_TEMU_HOST", "TEMU_TRACKING_ID", "TEMU_AFFILIATE_URL_TEMPLATE", "TEMU_MAX_ITEMS",
     "TEMU_CURRENCY", "TEMU_JOB_TIMEOUT", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "INSTAGRAM_GRAPH_API_VERSION",
+    "RAPIDAPI_KEY_TEMU_1", "RAPIDAPI_KEY_TEMU_2", "RAPIDAPI_KEY_TEMU_3", "RAPIDAPI_KEY_TEMU_4",
     "DRY_RUN_PUBLISHER",
 )
 
@@ -33,6 +35,10 @@ def clean_environment(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     # Entry points that load `.env` themselves (CLI, dashboard) must not find the developer's file.
     monkeypatch.setenv("TARSHISH_ENV_FILE", str(tmp_path / "no-such.env"))
+    # The Temu source uses its built-in single-provider chain unless a test names a chain file,
+    # and no test inherits another one's "quota exhausted" memory.
+    monkeypatch.setenv("TEMU_PROVIDERS_CONFIG_PATH", str(tmp_path / "no-such-temu-providers.yaml"))
+    temu_providers.reset_run_state()
     slept: list[float] = []
     monkeypatch.setattr(resilience, "_sleep", slept.append)
     yield slept

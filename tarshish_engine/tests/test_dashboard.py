@@ -240,3 +240,40 @@ def test_kpi_tab_shows_live_storefront_clicks_per_category_and_source(dashboard)
     assert 'title="sports: 2"' in by_category and 'title="gadgets: 1"' in by_category
     by_source = next(block for block in bars if "Clicks by source" in block)
     assert 'title="aliexpress_mock: 2"' in by_source and 'title="temu_mock: 1"' in by_source
+
+
+def test_temu_provider_chain_card_shows_order_keys_and_the_last_run(dashboard, tmp_path, monkeypatch):
+    from plugins.sources.temu_providers import record_run
+
+    def chain_table(app) -> str:
+        assert any("Temu RapidAPI Provider Chain" in block.value for block in app.markdown)
+        return next(block.value for block in app.markdown if "temu_primary_scraper" in block.value)
+
+    app, _ = dashboard
+    assert not app.exception
+    table = chain_table(app)  # the built-in chain: one provider, no key in the environment
+    assert "TemuProductScraperAdapter" in table and "RAPIDAPI_KEY_TEMU_1" in table and "Missing" in table
+    assert any("No live fetch has run yet" in caption.value for caption in app.caption)
+
+    key = "rapidkey-dashboard-0123456789abcdef"
+    monkeypatch.delenv("TEMU_PROVIDERS_CONFIG_PATH")  # the shipped config/temu_providers.yaml
+    monkeypatch.setenv("RAPIDAPI_KEY", key)
+    record_run(tmp_path / "dashboard.db", {
+        "finished_at": "2026-11-17T08:30:00+00:00", "category": "gadgets", "keyword": "tech gadgets",
+        "succeeded": "temuscout", "usable": 7,
+        "attempts": [
+            {"provider": "temu_primary_scraper", "outcome": "quota_exhausted", "detail": "HTTP 429: quota used up"},
+            {"provider": "temuscout", "outcome": "success", "detail": "24 item(s) received, 7 usable"},
+        ],
+    })
+    app.run()
+
+    assert not app.exception
+    table = chain_table(app)
+    order = [table.index(name) for name in
+             ("temu_primary_scraper", "temu_secondary_scraper", "temu_realtime_backup", "temuscout")]
+    assert order == sorted(order)  # the failover order, top to bottom
+    assert "Configured (via RAPIDAPI_KEY)" in table and "Missing" not in table
+    assert "quota used up (429)" in table and "✓ delivered" in table and "switched off" in table
+    assert any("temuscout" in caption.value and "7 usable product(s)" in caption.value for caption in app.caption)
+    assert not any(key in block.value for block in app.markdown)  # variable names only, never the key

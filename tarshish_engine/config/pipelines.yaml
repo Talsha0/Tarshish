@@ -31,13 +31,14 @@ pipelines:
         chat_id_env_var: "TG_SPORTS_CHAT_ID"
 
   # Real Temu gadgets (RapidAPI) ➔ Hebrew captions ➔ console + Instagram, paced by the queue worker.
-  # Needs RAPIDAPI_KEY for live runs; a --dry-run previews the products stored by
+  # Live runs walk the provider chain in config/temu_providers.yaml (needs RAPIDAPI_KEY or the
+  # per-provider keys); a --dry-run spends no quota and previews the products stored by
   #     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
   - id: "gadgets_he"
     enabled: true
     category: "gadgets"
     language: "he"
-    source: "temu_rapidapi"            # plugins/sources/temu_rapidapi.py — one API request per run
+    source: "temu_rapidapi"            # plugins/sources/temu_rapidapi.py — provider chain with failover
     generator: "llm_text_gen"
     llm_model: "claude-sonnet-5-5"
     publishers: ["console_pub", "instagram_pub"]
@@ -46,9 +47,9 @@ pipelines:
       min_rating: 4.5
       min_orders: 500
     options:
-      search_config:                   # query parameters of the Temu API request
+      search_config:                   # search terms, passed to the providers that support them
         keyword: "tech gadgets"
-        l2Category: "Electronics & Appliances"
+        l1Category: "Electronics & Appliances"   # a top-level Temu category (l2Category = sub-category)
         priceMin: 1
         priceMax: 100
     social_pages:

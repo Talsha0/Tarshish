@@ -11,7 +11,7 @@ Examples
     python main.py --flush-queue                                     # drop pending/queued items
     python main.py --seed-storefront                                 # load the storefront demo catalogue
     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
-                                                                     # real Temu products, one API request, no LLM
+                                                                     # real Temu products via the provider chain, no LLM
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manage.add_argument(
         "--seed-temu", action="store_true",
-        help="load real Temu products into the storefront: one RapidAPI search, no LLM calls "
+        help="load real Temu products into the storefront through the RapidAPI provider chain, no LLM calls "
              "(needs --category; --keyword and --limit are optional)",
     )
     manage.add_argument("--category", metavar="NAME", help="with --seed-temu: storefront category to file the products under")
@@ -184,7 +184,10 @@ def print_temu_seed(report, limit: int) -> None:
                 f"{product.orders_count:>9,} sold {format_price(product.price, product.currency):>9}  {title}")
 
     print(_RULE)
-    print(f" Temu seed · category {report.category} · keyword \"{report.keyword}\" · 1 search, no LLM calls")
+    print(f" Temu seed · category {report.category} · keyword \"{report.keyword}\" · "
+          f"provider {report.provider or 'none delivered'} · no LLM calls")
+    for attempt in report.attempts:
+        print(f"   {'✓' if attempt.ok else '✗'} provider   {attempt.provider:<24} {attempt.outcome:<16} {attempt.detail}")
     print(
         f" received {report.received} · inserted {len(report.inserted)} · skipped {len(report.duplicates)} duplicate"
         f" · {len(report.over_limit)} beyond --limit {limit} · {len(report.rejected)} rejected"
@@ -205,8 +208,9 @@ def print_temu_seed(report, limit: int) -> None:
     stand_ins = sum(1 for product in report.inserted if any(is_placeholder_image(url) for url in product.image_urls))
     if stand_ins:
         print(f"   ! {stand_ins} product(s) came without a photo and show a stand-in picture until enriched.")
-    if report.received == 0:
-        print("   ! The search finished but found no items for this keyword. Try broader search terms.")
+    if report.provider is None:
+        print("   ! No provider delivered usable products. Check the provider lines above: add or renew a key,")
+        print("     subscribe the key to another API in config/temu_providers.yaml, or try broader search terms.")
     print(_RULE)
 
 
@@ -275,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.category:
             parser.error("--seed-temu needs --category NAME (for example: --category gadgets)")
         if args.dry_run or args.mode:
-            parser.error("--seed-temu makes one real API request and writes products; "
+            parser.error("--seed-temu makes real API requests and writes products; "
                          "it cannot be combined with --dry-run or --mode")
     elif args.category or args.keyword or args.job:
         parser.error("--category, --keyword and --job only apply to --seed-temu")
@@ -296,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     try:
-        management = False
+        management, seed_failed = False, False
         if args.sync_config:
             management = True
             print(f"Synced {engine.registry.sync_from_yaml()} pipeline(s) from "
@@ -314,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
             limit = args.limit or 10
             report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
             print_temu_seed(report, limit)
+            seed_failed = report.provider is None
         if args.flush_queue:
             management = True
             print(f"Flushed {engine.db.flush_queue(args.pipeline)} pending/queued publication(s).")
@@ -328,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             management = True
             cmd_stats(engine, args.pipeline)
         if management:
-            return EXIT_OK
+            return EXIT_FAILURES if seed_failed else EXIT_OK
         if args.mode == "worker":
             return run_worker(engine, args)
         return run_pipelines(engine, args)

@@ -1,0 +1,78 @@
+# Temu provider chain for the `temu_rapidapi` source (plugins/sources/temu_rapidapi.py).
+#
+# The providers are tried from top to bottom. The walk stops at the first one that returns
+# usable products, so the quota of the providers below it is not touched. A provider is
+# skipped (logged, never fatal) when its key is missing, on HTTP 429 / 401 / 403, on a
+# timeout or 5xx after two retries, and when it returns no items or none that pass the
+# quality filter.
+#
+# Keys never go in this file. `api_key_env` is the NAME of a variable in .env; when that
+# variable is empty the provider uses RAPIDAPI_KEY. One RapidAPI key works for every API
+# the account is subscribed to, so a single RAPIDAPI_KEY is enough to start with.
+#
+# More quota for one API: list it twice with two different `api_key_env` names (two
+# RapidAPI accounts). A key that answers 429 is remembered and not asked again in that run.
+#
+# This file is read on every run: no --sync-config needed. Restart the dashboard to see changes.
+
+providers:
+  # 1. "Temu Product Scraper" (rapidapi.com/gioopasquale/api/temu-product-scraper).
+  #    Free plan: 5 searches a month, at most 5 results per search, no product photos.
+  #    Searches may run as a background job; the source waits and polls for the result.
+  - name: temu_primary_scraper
+    adapter: TemuProductScraperAdapter
+    host: temu-product-scraper.p.rapidapi.com
+    url: https://temu-product-scraper.p.rapidapi.com/temu
+    api_key_env: RAPIDAPI_KEY_TEMU_1
+    enabled: true
+
+  # 2 and 3. These two hosts did not exist on RapidAPI when this file was written
+  #    (2026-11-17: both answered 404 "API doesn't exists"), so they are switched off.
+  #    The adapters are ready: set the host/url of a real API with the same schema and enable it.
+  - name: temu_secondary_scraper
+    adapter: TemuScraper2Adapter          # GET /search?query=&keyword=&page=&limit=  ->  data.products[] | items[]
+    host: temu-scraper2.p.rapidapi.com
+    url: https://temu-scraper2.p.rapidapi.com/search
+    api_key_env: RAPIDAPI_KEY_TEMU_2
+    enabled: false
+
+  - name: temu_realtime_backup
+    adapter: TemuApiRealtimeAdapter       # GET /api/search?keywords=&page=&pageSize=  ->  result.goodsList[] | products[]
+    host: temu-api.p.rapidapi.com
+    url: https://temu-api.p.rapidapi.com/api/search
+    api_key_env: RAPIDAPI_KEY_TEMU_3
+    enabled: false
+
+  # 4. "TemuScout API" (rapidapi.com/dataocean/api/temuscout-api-temu-data-api), written with
+  #    the generic adapter — no Python involved. Free plan: 50 searches a month. Answers at
+  #    once (no job), 20-40 products per search, with photos, list price and currency.
+  #    Until the key is subscribed to this API it answers 403 and is skipped at no cost.
+  - name: temuscout
+    adapter: generic
+    host: temuscout-api-temu-data-api.p.rapidapi.com
+    url: https://temuscout-api-temu-data-api.p.rapidapi.com/v1/search
+    api_key_env: RAPIDAPI_KEY_TEMU_4
+    enabled: true
+    request:
+      # Query parameters: literals, or templates filled per search. A parameter whose
+      # placeholder has no value is left out. Placeholders: {keyword} {max_items} {page}
+      # {price_min} {price_max} {l1_category} {l2_category} {min_rating} {min_stars} {min_orders}
+      params:
+        q: "{keyword}"
+        market: us
+        sort: top_sales
+        min_rating: "{min_stars}"         # whole stars, at most 4; the exact threshold is applied locally
+    response:
+      items: data.products                # dotted path(s) to the item list; a list of paths is tried in order
+      # price_divisor: 100                # for APIs that report prices in cents
+      fields:                             # normalised field -> path(s) inside one item
+        goods_id: id
+        title: title
+        price: price
+        original_price: list_price
+        currency: currency
+        rating: rating
+        sales_volume: [sold, sold_text]
+        raw_url: url
+        image_urls: image
+        category_hint: category_id

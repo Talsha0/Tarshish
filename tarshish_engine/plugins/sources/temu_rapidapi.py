@@ -1,39 +1,54 @@
-"""Temu product source backed by the "Temu Product Scraper" API on RapidAPI.
+"""Temu product source backed by a failover chain of RapidAPI Temu endpoints.
 
-RapidAPI meters searches (the free plan allows a handful per month), so the plugin
-is built around one rule: **one search per fetch**. It asks for a broad batch
-(``maxItems``, 20 by default) and does everything else locally — thresholds,
-ranking, de-duplication.
+RapidAPI plans meter searches (free tiers allow a handful per month) and any one
+endpoint can be out of quota, unsubscribed, down or simply empty. So the source
+walks an ordered list of providers (``config/temu_providers.yaml``; adapters in
+``plugins/sources/temu_providers/``) and **stops at the first one that yields
+usable products**, which leaves the quota of the providers behind it untouched.
 
-The API is asynchronous. ``GET /temu`` starts a scraping job and answers with
-``{"status": "running", "jobId": ..., "resultUrl": "/jobs/<id>", "pollAfterSeconds": 10}``;
-the products arrive from ``GET /jobs/<id>`` once its status is ``done``. The plugin
-waits and polls (sparingly: the gap doubles up to a minute). A job that outlives
-``TEMU_JOB_TIMEOUT`` is not lost — its id is reported and ``fetch_batch(job_id=...)``
-/ ``--seed-temu --job <id>`` collects it later without starting a new search.
+A provider is skipped — logged, never fatal — when
+
+* its API key variable is not set (``api_key_env``, falling back to ``RAPIDAPI_KEY``),
+* it answers HTTP 429 (quota used up; remembered for the rest of the run),
+* it answers HTTP 401 / 403 (wrong key, or the key is not subscribed to that API),
+* it stays unreachable or answers 5xx after two quick retries,
+* it answers with no items, or with none that pass the local quality filter.
+
+Each provider gets one search per fetch: a broad batch (``TEMU_MAX_ITEMS``, 20 by
+default) that is filtered, ranked and de-duplicated locally. When every provider
+fails the source logs a summary and returns nothing.
+
+Some endpoints search in the background and answer with a running job; the source
+waits and polls (the gap doubles up to a minute). A job that outlives
+``TEMU_JOB_TIMEOUT`` is not lost — ``--seed-temu --job <id>`` collects it later
+without starting a new search — and the chain moves on meanwhile.
 
 Environment variables (see ``.env.example``)::
 
-    RAPIDAPI_KEY                   required for live fetches; masked in every log line
-    RAPIDAPI_TEMU_HOST             default temu-product-scraper.p.rapidapi.com
+    RAPIDAPI_KEY_TEMU_1 … _N       one key per provider (the names are set in temu_providers.yaml)
+    RAPIDAPI_KEY                   used by every provider whose own variable is empty
+    TEMU_PROVIDERS_CONFIG_PATH     default config/temu_providers.yaml
+    RAPIDAPI_TEMU_HOST             moves the first TemuProductScraperAdapter entry to another host
     TEMU_TRACKING_ID               your affiliate tracking value; empty = plain product links
     TEMU_AFFILIATE_URL_TEMPLATE    default {url}?_x_sessn_id={tracking_id}&refer_page_name=affiliate
     TEMU_MAX_ITEMS                 batch size per search, default 20
-    TEMU_JOB_TIMEOUT               seconds to wait for a search job to finish, default 300
-    TEMU_CURRENCY                  currency of the prices the API reports, default USD
+    TEMU_JOB_TIMEOUT               seconds to wait for a background search, default 300
+    TEMU_CURRENCY                  currency of prices when the API does not say, default USD
 
 Per-pipeline search terms live in the pipeline's ``options``::
 
     options:
       search_config:
         keyword: "tech gadgets"        # default: the pipeline's category
-        l2Category: "..."              # optional API filters
+        l1Category: "..."              # optional filters, passed to the providers that support them
+        l2Category: "..."
         priceMin: 1
         priceMax: 100
         skip_published: false          # true: drop (not just rank last) products this pipeline already handled
 
 A ``--dry-run`` never spends quota: it previews the Temu products already stored
-in SQLite for the category (``python main.py --seed-temu`` puts them there).
+in SQLite for the category (``python main.py --seed-temu`` puts them there), or
+mock stand-ins when nothing is stored yet.
 """
 
 from __future__ import annotations
@@ -42,13 +57,14 @@ import json
 import math
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from string import Formatter
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from core import resilience
 from core.database import Database, category_slug
@@ -64,33 +80,46 @@ from core.resilience import (
     with_retry,
 )
 from plugins import placeholder_image
+from plugins.sources import temu_providers
+from plugins.sources.temu_providers import JOB_ID_RE, BaseTemuProvider, TemuProviderError, resolve_key
+from plugins.sources.temu_providers.config import PRIMARY_HOST, config_error
 
 logger = get_logger("plugins.temu_rapidapi")
 
-DEFAULT_HOST = "temu-product-scraper.p.rapidapi.com"
+DEFAULT_HOST = PRIMARY_HOST
 DEFAULT_AFFILIATE_URL_TEMPLATE = "{url}?_x_sessn_id={tracking_id}&refer_page_name=affiliate"
-ENDPOINT_PATH = "/temu"
-JOB_PATH = "/jobs/{job_id}"
 DEFAULT_MAX_ITEMS = 20
 MAX_POLL_GAP = 60.0
 
-_JOB_ID_RE = re.compile(r"[A-Za-z0-9_\-]{4,64}")
-_JOB_PATH_RE = re.compile(r"/[A-Za-z0-9_\-./]{1,200}")
-_RUNNING = {"running", "queued", "pending", "processing", "started", "in_progress"}
-_DONE = {"done", "completed", "complete", "succeeded", "success", "finished"}
-_FAILED = {"failed", "error", "cancelled", "canceled", "timeout", "timed_out", "expired"}
+# Outcome of asking one provider (ProviderAttempt.outcome).
+SUCCESS = "success"
+MISSING_KEY = "missing_key"            # the provider's API key variable is not set
+QUOTA_EXHAUSTED = "quota_exhausted"    # HTTP 429
+AUTH_FAILED = "auth_failed"            # HTTP 401 / 403
+UNAVAILABLE = "unavailable"            # timeout / 5xx after the retries
+EMPTY = "empty"                        # HTTP 200 with 0 items
+FILTERED_OUT = "filtered_out"          # items came back, none passed the quality filter
+JOB_PENDING = "job_pending"            # the background search outlived TEMU_JOB_TIMEOUT
+ERROR = "error"                        # any other unusable reply
 
 _HOST_RE = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", re.I)
-_IMAGE_KEYS = ("imageUrl", "image", "image_url", "thumbnail", "thumbUrl", "imageUrls", "images")
 _warned: set[str] = set()
 
 
 class TemuRetryableError(TarshishError):
-    """Rate limit, timeout or server-side failure; ``retry_after`` is honoured by ``with_retry``."""
+    """Timeout or server-side failure; ``retry_after`` is honoured by ``with_retry``."""
 
     def __init__(self, message: str, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class TemuQuotaError(NonRetryableError):
+    """HTTP 429: the plan's quota (or rate limit) for this key is used up."""
+
+
+class TemuAuthError(NonRetryableError):
+    """HTTP 401 / 403: the key is wrong or not subscribed to this API."""
 
 
 class TemuJobPending(TarshishError):
@@ -99,18 +128,10 @@ class TemuJobPending(TarshishError):
     def __init__(self, job_id: str, waited: float) -> None:
         self.job_id = job_id
         super().__init__(
-            f"Temu search job {job_id} was still running after {waited:.0f}s. Nothing is lost: collect it later "
+            f"search job {job_id} was still running after {waited:.0f}s. Nothing is lost: collect it later "
             f"with `python main.py --seed-temu --category <name> --job {job_id}` (this starts no new search), "
             "or raise TEMU_JOB_TIMEOUT."
         )
-
-
-def _config_error(title: str, exc: ValidationError, rename: Callable[[str], str] = str) -> ConfigError:
-    lines = [
-        f"  - {rename('.'.join(str(part) for part in err['loc']))}: {err['msg'].removeprefix('Value error, ')}"
-        for err in exc.errors()
-    ]
-    return ConfigError(f"{title}:\n" + "\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #
@@ -121,8 +142,7 @@ class TemuSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    rapidapi_key: SecretStr | None = None
-    rapidapi_temu_host: str = DEFAULT_HOST
+    rapidapi_temu_host: str | None = None
     temu_tracking_id: str | None = None
     temu_affiliate_url_template: str = DEFAULT_AFFILIATE_URL_TEMPLATE
     temu_max_items: int = Field(default=DEFAULT_MAX_ITEMS, ge=1, le=100)
@@ -131,10 +151,12 @@ class TemuSettings(BaseModel):
 
     @field_validator("rapidapi_temu_host", mode="after")
     @classmethod
-    def _bare_host(cls, value: str) -> str:
-        # The API key is sent to this host, so it must be a host name and nothing else.
+    def _bare_host(cls, value: str | None) -> str | None:
+        # An API key is sent to this host, so it must be a host name and nothing else.
+        if value is None:
+            return None
         if not _HOST_RE.fullmatch(value):
-            raise ValueError("must be a bare host name such as 'temu-product-scraper.p.rapidapi.com' (no https://, no path)")
+            raise ValueError(f"must be a bare host name such as '{DEFAULT_HOST}' (no https://, no path)")
         return value.lower()
 
     @field_validator("temu_affiliate_url_template", mode="after")
@@ -161,7 +183,7 @@ class TemuSettings(BaseModel):
         try:
             return cls(**{name: value for name, value in values.items() if value is not None})
         except ValidationError as exc:
-            raise _config_error(
+            raise config_error(
                 "Invalid Temu source configuration (.env / environment variables)", exc, str.upper
             ) from None
 
@@ -175,11 +197,12 @@ class TemuSettings(BaseModel):
 
 
 class TemuSearch(BaseModel):
-    """``options.search_config`` of a pipeline (keys as the API spells them)."""
+    """``options.search_config`` of a pipeline (keys as the original API spells them)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, str_strip_whitespace=True)
 
     keyword: str | None = Field(default=None, min_length=1)
+    l1_category: str | None = Field(default=None, alias="l1Category", min_length=1)
     l2_category: str | None = Field(default=None, alias="l2Category", min_length=1)
     price_min: float | None = Field(default=None, alias="priceMin", ge=0)
     price_max: float | None = Field(default=None, alias="priceMax", ge=0)
@@ -188,71 +211,73 @@ class TemuSearch(BaseModel):
 
 
 @dataclass
+class ProviderAttempt:
+    """What happened when one provider of the chain was asked."""
+
+    provider: str
+    adapter: str
+    host: str
+    outcome: str
+    detail: str = ""
+    http_status: int | None = None
+    received: int = 0
+    usable: int = 0
+    key_env: str | None = None      # the variable the key came from — a name, never the key
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == SUCCESS
+
+
+@dataclass
 class TemuBatch:
-    """What one API request yielded after local filtering."""
+    """What one walk down the provider chain yielded after local filtering."""
 
     keyword: str
     received: int = 0
     products: list[Product] = field(default_factory=list)            # usable, best first
     rejected: list[tuple[str, str]] = field(default_factory=list)    # (item label, reason)
     notice: str | None = None
+    provider: str | None = None                                      # the provider that delivered; None = all failed
+    attempts: list[ProviderAttempt] = field(default_factory=list)    # in chain order, up to the one that delivered
 
 
 # --------------------------------------------------------------------------- #
-# Payload helpers
+# Helpers
 # --------------------------------------------------------------------------- #
-def _number(value: Any) -> float:
-    """``1.99``, ``"$1.99"``, ``"11,779"`` and ``"10K+"`` as a number; ``None`` counts as 0."""
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    match = re.search(r"(\d+(?:\.\d+)?)\s*([km])?", str(value).replace(",", ""), re.I)
-    if not match:
-        raise ValueError(f"not a number: {value!r}")
-    return float(match[1]) * {"k": 1_000, "m": 1_000_000}.get((match[2] or "").lower(), 1)
-
-
-def _image_urls(item: dict[str, Any]) -> list[str]:
-    urls: list[str] = []
-    for key in _IMAGE_KEYS:
-        value = item.get(key)
-        for candidate in value if isinstance(value, list) else [value]:
-            if not isinstance(candidate, str):
-                continue
-            url = candidate.strip()
-            url = f"https:{url}" if url.startswith("//") else url
-            if re.match(r"https?://\S+$", url) and url not in urls:
-                urls.append(url)
-    return urls
-
-
 def _rank(product: Product) -> tuple[float, int]:
     """Best first: rating weighted by the order of magnitude of the sales volume."""
     return (product.rating * math.log10(product.orders_count + 1), product.orders_count)
 
 
-def _label(item: Any) -> str:
-    if not isinstance(item, dict):
-        return "?"
-    title = str(item.get("title") or "").strip()
-    return f"{item.get('goodsId') or '?'} {title[:48]}".strip()
+def _label(item: Mapping[str, Any]) -> str:
+    return f"{item.get('goods_id') or '?'} {str(item.get('title') or '')[:48]}".strip()
+
+
+def _payload_hint(payload: Mapping[str, Any]) -> str:
+    """Why a 200 reply held no items, as far as the payload says."""
+    for key in ("message", "description", "error", "msg"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"{key}: {redact(value.strip())[:160]}"
+    return f"response fields: {', '.join(sorted(map(str, payload))) or 'none'}"
 
 
 class TemuRapidApiSource(BaseSource):
-    """Real Temu listings through RapidAPI — one search per fetch."""
+    """Real Temu listings through RapidAPI — an ordered provider chain with failover."""
 
     _transport: Any = None  # test hook: an httpx.MockTransport instead of the network
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
         self._settings: TemuSettings | None = None
+        self._providers: list[BaseTemuProvider] | None = None
         try:
             settings = self.settings()
+            for provider in self.providers():
+                register_secret(resolve_key(provider.config, self.context.settings.get_env)[0])
         except ConfigError:
-            return  # reported, with the variable name, when a fetch is attempted
-        if settings.rapidapi_key is not None:
-            register_secret(settings.rapidapi_key.get_secret_value())
+            return  # reported, with the variable or file name, when a fetch is attempted
         if not settings.temu_tracking_id and "tracking" not in _warned:
             _warned.add("tracking")
             logger.warning(
@@ -270,20 +295,26 @@ class TemuRapidApiSource(BaseSource):
             self._settings = TemuSettings.from_env(self.context.settings.get_env)
         return self._settings
 
+    def providers(self) -> list[BaseTemuProvider]:
+        """The configured chain, in order (disabled providers included)."""
+        if self._providers is None:
+            self._providers = temu_providers.build_chain(self.context.settings.get_env)
+        return self._providers
+
     def search(self) -> TemuSearch:
         raw = self.context.options.get("search_config") or {}
         try:
             return TemuSearch.model_validate(raw)
         except ValidationError as exc:
             pipeline = self.context.pipeline_id or "?"
-            raise _config_error(f"Pipeline '{pipeline}': invalid options.search_config", exc) from None
+            raise config_error(f"Pipeline '{pipeline}': invalid options.search_config", exc) from None
 
     # -- contract ------------------------------------------------------------------- #
     def fetch_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
         if limit <= 0:
             return []
         if self.context.dry_run:
-            return self._stored_products(category, min_rating, min_orders, limit)
+            return self._preview_products(category, min_rating, min_orders, limit)
 
         search = self.search()
         batch = self.fetch_batch(category, min_rating, min_orders, max_items=limit)
@@ -294,101 +325,170 @@ class TemuRapidApiSource(BaseSource):
         # fall off the end; otherwise the orchestrator skips them before any LLM call, and --force
         # and back-filling a newly added page keep working.
         seen = [] if search.skip_published else [product for product in batch.products if product.ref in handled]
-        logger.info(
-            "Temu '%s': %d received, %d usable, %d not yet handled by this pipeline.",
-            batch.keyword, batch.received, len(batch.products), len(fresh),
-        )
+        if batch.provider:
+            logger.info(
+                "Temu '%s' via %s: %d received, %d usable, %d not yet handled by this pipeline.",
+                batch.keyword, batch.provider, batch.received, len(batch.products), len(fresh),
+            )
         return (fresh + seen)[:limit]
 
-    # -- one search, then local work -------------------------------------------------- #
+    # -- the failover chain ------------------------------------------------------------ #
     def fetch_batch(
         self, category: str, min_rating: float = 0.0, min_orders: int = 0, *,
         keyword: str | None = None, max_items: int | None = None, job_id: str | None = None,
     ) -> TemuBatch:
-        """Spend exactly one search and return its usable products, best first.
+        """Ask the providers in order and return the first usable batch, best products first.
 
-        With ``job_id`` no search is started: the results of that earlier job are collected.
+        Every provider that is asked spends one of its searches, so the walk stops at the first
+        one that delivers. When none does, the batch comes back empty with ``provider`` unset and
+        one ``attempts`` entry per provider saying why. With ``job_id`` no search is started: the
+        results of that earlier background job are collected.
         """
         settings = self.settings()
-        if settings.rapidapi_key is None:
-            raise ConfigError(
-                "RAPIDAPI_KEY is not set — the Temu source needs it for live requests. Add it to .env "
-                "(a --dry-run needs no key: it previews products already stored by --seed-temu)."
-            )
         search = self.search()
-        keyword = (keyword or search.keyword or re.sub(r"[\W_]+", " ", category)).strip()
-        params: dict[str, Any] = {
-            "keyword": keyword,
-            "maxItems": min(100, max(search.max_items or settings.temu_max_items, max_items or 0)),
-        }
-        for name, value in (("l2Category", search.l2_category), ("priceMin", search.price_min),
-                            ("priceMax", search.price_max)):
-            if value is not None:
-                params[name] = f"{value:g}" if isinstance(value, float) else value
-
+        chain = [provider for provider in self.providers() if provider.config.enabled]
         if job_id is not None:
-            if not _JOB_ID_RE.fullmatch(job_id):
+            if not JOB_ID_RE.fullmatch(job_id):
                 raise ConfigError(f"'{job_id}' is not a Temu job id (expected letters, digits, '-' or '_').")
-            started: dict[str, Any] = {"status": "running", "jobId": job_id, "pollAfterSeconds": 0}
-        else:
-            started = self._request(settings, ENDPOINT_PATH, params)
-        payload = self._await_job(settings, started)
+            chain = [provider for provider in chain if provider.job_request(job_id) is not None]
+            if not chain:
+                raise ConfigError("No enabled Temu provider runs searches as jobs, so there is nothing to collect by id.")
 
-        if job_id is not None and isinstance(payload.get("query"), dict):
-            keyword = str(payload["query"].get("keyword") or keyword)
-        batch = self._parse(payload, keyword, category, settings, min_rating, min_orders)
-        if batch.notice:
-            logger.debug("Temu API notice for '%s': %s", keyword, batch.notice)
-        logger.debug(
-            "Temu '%s': 1 search, %d item(s) received, %d usable, %d rejected.",
-            keyword, batch.received, len(batch.products), len(batch.rejected),
-        )
+        keyword = (keyword or search.keyword or re.sub(r"[\W_]+", " ", category)).strip()
+        want = min(100, max(search.max_items or settings.temu_max_items, max_items or 0))
+        filters = {
+            "price_min": search.price_min, "price_max": search.price_max, "l1_category": search.l1_category,
+            "l2_category": search.l2_category, "min_rating": min_rating, "min_orders": min_orders,
+        }
+
+        batch = TemuBatch(keyword=keyword)
+        for position, provider in enumerate(chain, start=1):
+            attempt, found = self._ask(
+                provider, settings, keyword, want, filters, category, min_rating, min_orders, job_id
+            )
+            batch.attempts.append(attempt)
+            if attempt.ok and found is not None:
+                batch.provider = provider.name
+                batch.keyword, batch.received, batch.notice = found.keyword, found.received, found.notice
+                batch.products, batch.rejected = found.products, found.rejected
+                break
+            if found is not None:
+                batch.received += found.received
+                batch.rejected.extend(found.rejected)
+                batch.notice = batch.notice or found.notice
+            logger.warning(
+                "Temu provider failover | provider=%s adapter=%s host=%s outcome=%s http=%s received=%d usable=%d "
+                "detail=%s | %s",
+                attempt.provider, attempt.adapter, attempt.host, attempt.outcome, attempt.http_status or "-",
+                attempt.received, attempt.usable, attempt.detail,
+                "trying the next provider" if position < len(chain) else "no provider left",
+            )
+
+        if batch.provider:
+            logger.info(
+                "Temu '%s': provider %s delivered %d usable product(s) of %d received (%d provider(s) asked).",
+                batch.keyword, batch.provider, len(batch.products), batch.received, len(batch.attempts),
+            )
+            if batch.notice:
+                logger.debug("Temu API notice for '%s': %s", batch.keyword, batch.notice)
+        else:
+            logger.error(
+                "Temu '%s': no provider delivered products (%s).", keyword,
+                "; ".join(f"{attempt.provider}: {attempt.outcome}" for attempt in batch.attempts)
+                or "no provider is enabled in the chain",
+            )
+        temu_providers.record_run(self.context.settings.database_path, {
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "pipeline_id": self.context.pipeline_id, "category": category, "keyword": batch.keyword,
+            "succeeded": batch.provider, "usable": len(batch.products),
+            "attempts": [asdict(attempt) for attempt in batch.attempts],
+        })
         return batch
 
-    def _await_job(self, settings: TemuSettings, job: dict[str, Any]) -> dict[str, Any]:
-        """Follow a search job until it carries its results; polls are spaced out to stay cheap."""
-        waited, gap = 0.0, None
-        while True:
-            status = str(job.get("status") or "").strip().lower()
-            if isinstance(job.get("results"), list) and status not in _RUNNING:
-                return job
-            job_id = str(job.get("jobId") or "").strip()
-            if status in _FAILED:
-                detail = redact(str(job.get("message") or job.get("error") or "no details"))
-                raise NonRetryableError(f"Temu search job {job_id or '?'} ended as '{status}': {detail}")
-            path = str(job.get("resultUrl") or "")
-            if not _JOB_PATH_RE.fullmatch(path):
-                path = JOB_PATH.format(job_id=job_id) if _JOB_ID_RE.fullmatch(job_id) else ""
-            if status in _DONE or not path:
-                raise NonRetryableError(
-                    "Temu API returned neither a 'results' list nor a running job "
-                    f"(status {status or 'missing'!r}, fields: {', '.join(sorted(map(str, job))) or 'none'})"
-                )
-            if gap is None:
-                logger.info("Temu search is running as job %s; waiting for its results…", job_id)
-            elif waited >= settings.temu_job_timeout:
-                raise TemuJobPending(job_id, waited)
+    def _ask(
+        self, provider: BaseTemuProvider, settings: TemuSettings, keyword: str, want: int,
+        filters: Mapping[str, Any], category: str, min_rating: float, min_orders: int, job_id: str | None,
+    ) -> tuple[ProviderAttempt, TemuBatch | None]:
+        """One provider, one search. Every failure becomes an outcome; nothing escapes to the caller."""
+        config = provider.config
+        key, key_env = resolve_key(config, self.context.settings.get_env)
+        attempt = ProviderAttempt(
+            provider=config.name, adapter=type(provider).__name__, host=config.host, outcome=ERROR, key_env=key_env,
+        )
 
-            hint = job.get("pollAfterSeconds")
-            hint = float(hint) if isinstance(hint, (int, float)) and not isinstance(hint, bool) else 10.0
-            gap = min(MAX_POLL_GAP, max(0.0, hint) if gap is None else max(hint, gap * 2, 5.0))
+        def failed(outcome: str, detail: str, status: int | None = None) -> tuple[ProviderAttempt, None]:
+            attempt.outcome, attempt.detail, attempt.http_status = outcome, redact(detail), status
+            return attempt, None
+
+        if key is None:
+            names = " or ".join(dict.fromkeys((config.api_key_env, temu_providers.FALLBACK_KEY_ENV)))
+            return failed(MISSING_KEY, f"{names} is not set in .env")
+        register_secret(key)
+        if temu_providers.is_exhausted(config.host, key):
+            return failed(QUOTA_EXHAUSTED, "skipped: this key already ran out of quota on this API during this run")
+
+        try:
+            request = provider.job_request(job_id) if job_id else provider.build_request(keyword, want, filters)
+            payload = self._await_job(provider, key, self._request(key, *request), settings)
+            items = provider.parse_response(payload)
+        except TemuQuotaError as exc:
+            temu_providers.mark_exhausted(config.host, key)
+            return failed(QUOTA_EXHAUSTED, str(exc), 429)
+        except TemuAuthError as exc:
+            return failed(AUTH_FAILED, str(exc), getattr(exc, "status", None))
+        except TemuJobPending as exc:
+            return failed(JOB_PENDING, str(exc))
+        except TemuRetryableError as exc:
+            return failed(UNAVAILABLE, f"{exc} (after 2 retries)", getattr(exc, "status", None))
+        except (NonRetryableError, TemuProviderError) as exc:
+            return failed(ERROR, str(exc), getattr(exc, "status", None))
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:  # a mapping that does not fit
+            return failed(ERROR, f"the response could not be read: {type(exc).__name__}: {exc}")
+
+        attempt.http_status, attempt.received = 200, len(items)
+        if not items:
+            return failed(EMPTY, f"HTTP 200 with 0 items ({_payload_hint(payload)})", 200)
+        found = self._parse(items, provider.searched_keyword(payload) or keyword, category, settings,
+                            min_rating, min_orders)
+        found.notice = provider.notice(payload)
+        attempt.usable = len(found.products)
+        if not found.products:
+            attempt.outcome = FILTERED_OUT
+            attempt.detail = (
+                f"{len(items)} item(s) received, none passed the quality filter "
+                f"(rating ≥ {min_rating:g}, sold ≥ {min_orders:,})"
+            )
+            return attempt, found
+        attempt.outcome = SUCCESS
+        attempt.detail = f"{len(items)} item(s) received, {len(found.products)} usable"
+        return attempt, found
+
+    def _await_job(
+        self, provider: BaseTemuProvider, key: str, payload: dict[str, Any], settings: TemuSettings
+    ) -> dict[str, Any]:
+        """Follow a background search until its payload is final; polls are spaced out to stay cheap."""
+        waited, gap, job = 0.0, None, None
+        while True:
+            job = provider.pending_job(payload, job)
+            if job is None:
+                return payload
+            if gap is None:
+                logger.info("Temu search on %s is running as job %s; waiting for its results…", provider.name, job.job_id)
+            elif waited >= settings.temu_job_timeout:
+                raise TemuJobPending(job.job_id, waited)
+            gap = min(MAX_POLL_GAP, job.poll_after if gap is None else max(job.poll_after, gap * 2, 5.0))
             if gap > 0:
                 resilience._sleep(gap)  # the engine's one sleeping seam
                 waited += gap
-            job = {"jobId": job_id, "resultUrl": path, **self._request(settings, path, None)}
+            payload = self._request(key, job.url, provider.headers(), {})
 
     @with_retry(max_attempts=3, base_delay=2.0)
-    def _request(self, settings: TemuSettings, path: str, params: dict[str, Any] | None) -> dict[str, Any]:
-        headers = {
-            "x-rapidapi-host": settings.rapidapi_temu_host,
-            "x-rapidapi-key": settings.rapidapi_key.get_secret_value() if settings.rapidapi_key else "",
-        }
-        url = f"https://{settings.rapidapi_temu_host}{path}"
+    def _request(self, key: str, url: str, headers: Mapping[str, str], params: Mapping[str, Any]) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0), transport=self._transport) as client:
-                response = client.get(url, params=params, headers=headers)
+                response = client.get(url, params=dict(params) or None, headers={**headers, "x-rapidapi-key": key})
         except httpx.HTTPError as exc:
-            raise TemuRetryableError(redact(f"Temu API unreachable: {type(exc).__name__}: {exc}")) from None
+            raise TemuRetryableError(redact(f"API unreachable: {type(exc).__name__}: {exc}")) from None
         return self._interpret(response)
 
     @staticmethod
@@ -400,33 +500,38 @@ class TemuRapidApiSource(BaseSource):
             body = None
         status = response.status_code
         detail = redact(str(body.get("message") or body.get("error") or "")) if isinstance(body, dict) else ""
-        message = f"Temu API request failed (HTTP {status})" + (f": {detail}" if detail else "")
+        message = f"HTTP {status}" + (f": {detail}" if detail else "")
 
-        if status == 429 and "quota" in detail.lower():
-            raise NonRetryableError(f"{message} — the RapidAPI plan's quota is used up")
-        if status in (408, 429) or status >= 500:
+        def error(kind: type[TarshishError], text: str, **extra: Any) -> TarshishError:
+            exc = kind(text, **extra)
+            exc.status = status  # type: ignore[attr-defined]
+            return exc
+
+        if status == 429:
+            raise error(TemuQuotaError, f"{message} — the plan's quota for this key is used up")
+        if status == 408 or status >= 500:
             retry_after = response.headers.get("retry-after", "")
-            raise TemuRetryableError(message, retry_after=float(retry_after) if retry_after.isdigit() else None)
+            raise error(TemuRetryableError, message, retry_after=float(retry_after) if retry_after.isdigit() else None)
         if status in (401, 403):
-            raise NonRetryableError(f"{message} — check RAPIDAPI_KEY and that the key is subscribed to this API")
+            raise error(TemuAuthError, f"{message} — check the key and that it is subscribed to this API")
         if status >= 400:
-            raise NonRetryableError(message)
+            raise error(NonRetryableError, message)
+        if isinstance(body, list):
+            body = {"items": body}  # a bare JSON array is read as {"items": [...]}
         if not isinstance(body, dict):
-            raise NonRetryableError("Temu API returned an unexpected payload (not a JSON object)")
+            raise error(NonRetryableError, "unexpected payload (not a JSON object)")
         if body.get("success") is False:
-            raise NonRetryableError(f"Temu API reported a failure: {detail or 'no details'}")
+            raise error(NonRetryableError, f"the API reported a failure: {detail or 'no details'}")
         return body
 
     def _parse(
-        self, payload: dict[str, Any], keyword: str, category: str, settings: TemuSettings,
+        self, items: Sequence[Mapping[str, Any]], keyword: str, category: str, settings: TemuSettings,
         min_rating: float, min_orders: int,
     ) -> TemuBatch:
-        results = payload.get("results") or []
-        notice = payload.get("notice")
-        batch = TemuBatch(keyword=keyword, received=len(results), notice=str(notice) if notice else None)
-
+        """Normalised items -> products: validate, apply the thresholds, rank, drop duplicates."""
+        batch = TemuBatch(keyword=keyword, received=len(items))
         candidates: list[Product] = []
-        for item in results:
+        for item in items:
             try:
                 product = self._product(item, category, settings)
             except (ValidationError, ValueError, TypeError, KeyError) as exc:
@@ -451,22 +556,25 @@ class TemuRapidApiSource(BaseSource):
             batch.products.append(product)
         return batch
 
-    def _product(self, item: Any, category: str, settings: TemuSettings) -> Product:
-        if not isinstance(item, dict):
-            raise ValueError("not an object")
-        raw_url = str(item.get("url") or "").strip()
+    def _product(self, item: Mapping[str, Any], category: str, settings: TemuSettings) -> Product:
+        price = item.get("price")
+        if price is None:
+            raise ValueError("no price")
+        original = item.get("original_price")
+        raw_url = str(item.get("raw_url") or "")
         return Product(
-            external_id=str(item.get("goodsId") or "").strip(),
+            external_id=str(item.get("goods_id") or ""),
             source=self.source_name,
             category=category,
             title=str(item.get("title") or ""),
-            price=_number(item.get("price")),
-            currency=settings.temu_currency,
-            rating=_number(item.get("rating")),
-            orders_count=int(_number(item.get("salesVolume"))),
+            price=price,
+            original_price=original if original and original > price else None,
+            currency=item.get("currency") or settings.temu_currency,
+            rating=item.get("rating") or 0.0,
+            orders_count=int(item.get("sales_volume") or 0),
             raw_url=raw_url,
             affiliate_url=settings.affiliate_url(raw_url),
-            image_urls=_image_urls(item) or [placeholder_image(category)],
+            image_urls=list(item.get("image_urls") or []) or [placeholder_image(category)],
         )
 
     # -- SQLite ----------------------------------------------------------------------- #
@@ -500,8 +608,20 @@ class TemuRapidApiSource(BaseSource):
         stored_hashes = {row["canonical_hash"] for row in rows}
         return {p.ref for p in products if p.external_id in stored_ids or p.canonical_hash in stored_hashes}
 
-    def _stored_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
-        """Dry-run feed: this source's products already in SQLite — no request, no quota."""
+    # -- dry-run ------------------------------------------------------------------------ #
+    def _preview_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
+        """Dry-run feed — no request, no quota: stored Temu products, else mock stand-ins."""
+        products = self._stored_products(category, min_rating, min_orders)
+        if not products:
+            products = self._mock_products(category, min_rating, min_orders)
+            logger.warning(
+                "Dry-run spends no RapidAPI quota and no Temu products are stored for category '%s' yet: "
+                "previewing %d mock stand-in(s). Load real ones with: python main.py --seed-temu --category %s",
+                category, len(products), category,
+            )
+        return sorted(products, key=_rank, reverse=True)[:limit]
+
+    def _stored_products(self, category: str, min_rating: float, min_orders: int) -> list[Product]:
         try:
             rows = self._db().query(
                 "SELECT external_id, title, price, original_price, currency, rating, orders_count, "
@@ -519,14 +639,24 @@ class TemuRapidApiSource(BaseSource):
                     external_id=row["external_id"], source=self.source_name, category=category, title=row["title"],
                     price=row["price"], original_price=row["original_price"], currency=row["currency"],
                     rating=row["rating"], orders_count=row["orders_count"],
-                    raw_url=row["affiliate_url"].split("?", 1)[0], affiliate_url=row["affiliate_url"],
+                    raw_url=row["affiliate_url"].split("&" if "goods_id=" in row["affiliate_url"] else "?", 1)[0],
+                    affiliate_url=row["affiliate_url"],
                     image_urls=json.loads(row["image_urls_json"] or "[]"),
                 ))
             except (ValidationError, ValueError, TypeError):
                 continue
-        if not products:
-            logger.warning(
-                "Dry-run spends no RapidAPI quota and no Temu products are stored for category '%s' yet. "
-                "Load some with: python main.py --seed-temu --category %s", category, category,
-            )
-        return sorted(products, key=_rank, reverse=True)[:limit]
+        return products
+
+    def _mock_products(self, category: str, min_rating: float, min_orders: int) -> list[Product]:
+        """The mock Temu shelf, for previewing a pipeline before any real product is stored."""
+        from plugins.sources._mock_catalogue import product_fields
+
+        products: list[Product] = []
+        for fields in product_fields("temu_mock", category):
+            try:
+                product = Product(source=self.source_name, category=category, **fields)
+            except (ValidationError, ValueError, TypeError):
+                continue
+            if product.rating >= min_rating and product.orders_count >= min_orders:
+                products.append(product)
+        return products
