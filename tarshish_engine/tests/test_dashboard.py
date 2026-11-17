@@ -277,3 +277,40 @@ def test_temu_provider_chain_card_shows_order_keys_and_the_last_run(dashboard, t
     assert "quota used up (429)" in table and "✓ delivered" in table and "switched off" in table
     assert any("temuscout" in caption.value and "7 usable product(s)" in caption.value for caption in app.caption)
     assert not any(key in block.value for block in app.markdown)  # variable names only, never the key
+
+
+def test_aliexpress_provider_chain_card_shows_order_keys_and_the_last_run(dashboard, tmp_path, monkeypatch):
+    from plugins.sources.aliexpress_providers import record_run
+
+    def chain_table(app) -> str:
+        assert any("AliExpress RapidAPI Provider Chain" in block.value for block in app.markdown)
+        return next(block.value for block in app.markdown if "ali_primary_datahub" in block.value)
+
+    app, _ = dashboard
+    assert not app.exception
+    table = chain_table(app)  # shown next to the Temu card; no key in the environment yet
+    order = [table.index(name) for name in ("ali_primary_datahub", "ali_secondary_trueapi", "ali_backup_unofficial")]
+    assert order == sorted(order)  # the failover order, top to bottom
+    assert "AliExpressDataHubAdapter" in table and "RAPIDAPI_KEY_ALI_1" in table and "Missing" in table
+
+    key = "alikey-dashboard-0123456789abcdef"
+    monkeypatch.setenv("RAPIDAPI_KEY_ALI_1", key)
+    monkeypatch.setenv("RAPIDAPI_KEY", key)
+    record_run(tmp_path / "dashboard.db", {
+        "finished_at": "2026-11-17T08:30:00+00:00", "category": "gadgets", "keyword": "smart watch",
+        "succeeded": "ali_backup_unofficial", "usable": 4,
+        "attempts": [
+            {"provider": "ali_primary_datahub", "outcome": "quota_exhausted", "detail": "HTTP 429: quota used up"},
+            {"provider": "ali_secondary_trueapi", "outcome": "empty", "detail": "HTTP 200 with 0 items"},
+            {"provider": "ali_backup_unofficial", "outcome": "success", "detail": "20 item(s) received, 4 usable"},
+        ],
+    })
+    app.run()
+
+    assert not app.exception
+    table = chain_table(app)
+    assert "Configured" in table and "Configured (via RAPIDAPI_KEY)" in table and "Missing" not in table
+    assert "quota used up (429)" in table and "✗ no items" in table and "✓ delivered" in table
+    assert any("ali_backup_unofficial" in caption.value and "4 usable product(s)" in caption.value
+               for caption in app.caption)
+    assert not any(key in block.value for block in app.markdown)  # variable names only, never the key

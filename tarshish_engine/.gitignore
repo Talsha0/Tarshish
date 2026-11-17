@@ -6,6 +6,7 @@
 *.db-wal
 *.db-shm
 temu_provider_status.json
+aliexpress_provider_status.json
 logs/
 output/*
 !output/.gitkeep

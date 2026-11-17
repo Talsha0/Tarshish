@@ -11,6 +11,10 @@ a pipeline already stored keep their ids, publications and click history.
 
 Loads real Temu products through the ``temu_rapidapi`` source and its provider chain
 (see ``seed_temu``).
+
+    python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10
+
+The same for AliExpress through the ``aliexpress_rapidapi`` failover chain (see ``seed_aliexpress``).
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ if TYPE_CHECKING:
     from core import Engine
 
 TEMU_SOURCE = "temu_rapidapi"
+ALIEXPRESS_SOURCE = "aliexpress_rapidapi"
+SEED_SOURCES = (TEMU_SOURCE, ALIEXPRESS_SOURCE)
 
 
 def seed_storefront(db: Database) -> int:
@@ -39,8 +45,8 @@ def seed_storefront(db: Database) -> int:
 
 
 @dataclass
-class TemuSeedReport:
-    """Outcome of one ``--seed-temu`` run (one search per provider that had to be asked)."""
+class SeedReport:
+    """Outcome of one ``--seed-temu`` / ``--seed-aliexpress`` run (one search per provider asked)."""
 
     category: str
     keyword: str
@@ -54,6 +60,10 @@ class TemuSeedReport:
     notice: str | None = None
     provider: str | None = None                                  # the provider that delivered; None = all failed
     attempts: list[Any] = field(default_factory=list)            # ProviderAttempt per provider asked, in order
+    source: str = TEMU_SOURCE                                    # the source plugin that ran the chain
+
+
+TemuSeedReport = SeedReport  # the original name
 
 
 def _standard(engine: "Engine", name: str, default: float) -> float:
@@ -63,31 +73,31 @@ def _standard(engine: "Engine", name: str, default: float) -> float:
         return default
 
 
-def seed_temu(
-    engine: "Engine", *, category: str, keyword: str | None = None, limit: int = 10, job_id: str | None = None,
-) -> TemuSeedReport:
-    """Load real Temu products into the storefront: no LLM call, one search per provider asked.
-
-        python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
+def seed_source(
+    engine: "Engine", source_plugin: str, *, category: str, keyword: str | None = None, limit: int = 10,
+    job_id: str | None = None,
+) -> SeedReport:
+    """Load real products of one RapidAPI chain source into the storefront: no LLM call.
 
     The source walks its provider chain and stops at the first provider that delivers usable
     products. That batch is filtered against the storefront's listing standard, ranked by rating and
     sales, and the best ``limit`` products that SQLite does not hold yet are inserted
     under ``category``. Products already stored (same store id, or the same item from
-    another source) are reported as duplicates and left as they are. ``job_id`` collects
-    the results of a search that is already running or finished instead of starting one.
+    another source) are reported as duplicates and left as they are. ``job_id`` (Temu only)
+    collects the results of a search that is already running or finished instead of starting one.
     """
-    source: Any = engine.plugins.get("source", TEMU_SOURCE)(PluginContext(settings=engine.settings))
+    if source_plugin not in SEED_SOURCES:
+        raise ValueError(f"cannot seed from '{source_plugin}' (choose one of: {', '.join(SEED_SOURCES)})")
+    source: Any = engine.plugins.get("source", source_plugin)(PluginContext(settings=engine.settings))
     min_rating = _standard(engine, "STOREFRONT_MIN_RATING", 4.5)
     min_orders = int(_standard(engine, "STOREFRONT_MIN_ORDERS", 200))
-    batch = source.fetch_batch(
-        category, min_rating, min_orders, keyword=keyword, max_items=limit, job_id=job_id
-    )
+    extra = {"job_id": job_id} if job_id is not None else {}
+    batch = source.fetch_batch(category, min_rating, min_orders, keyword=keyword, max_items=limit, **extra)
 
-    report = TemuSeedReport(
+    report = SeedReport(
         category=category, keyword=batch.keyword, received=batch.received, min_rating=min_rating,
         min_orders=min_orders, rejected=list(batch.rejected), notice=batch.notice,
-        provider=batch.provider, attempts=list(batch.attempts),
+        provider=batch.provider, attempts=list(batch.attempts), source=source_plugin,
     )
     known = source.stored_refs(batch.products)
     for product in batch.products:
@@ -99,6 +109,24 @@ def seed_temu(
             engine.db.upsert_product(product, {"category": category})
             report.inserted.append(product)
     return report
+
+
+def seed_temu(
+    engine: "Engine", *, category: str, keyword: str | None = None, limit: int = 10, job_id: str | None = None,
+) -> SeedReport:
+    """Load real Temu products into the storefront: no LLM call, one search per provider asked.
+
+        python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
+    """
+    return seed_source(engine, TEMU_SOURCE, category=category, keyword=keyword, limit=limit, job_id=job_id)
+
+
+def seed_aliexpress(engine: "Engine", *, category: str, keyword: str | None = None, limit: int = 10) -> SeedReport:
+    """Load real AliExpress products into the storefront through the RapidAPI failover chain: no LLM call.
+
+        python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10
+    """
+    return seed_source(engine, ALIEXPRESS_SOURCE, category=category, keyword=keyword, limit=limit)
 
 
 def main() -> int:

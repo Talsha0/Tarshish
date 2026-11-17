@@ -69,6 +69,7 @@ Then open <http://localhost:3000> (it redirects to the Hebrew storefront, `/he`)
 | `python main.py --list-pipelines` / `--sync-config` | List pipelines / upsert `config/pipelines.yaml` into the database. |
 | `python main.py --seed-storefront` | Load the 14-product demo catalogue into the storefront (an upsert; safe to repeat). |
 | `python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10` | Load real Temu products into the storefront through the provider chain (one search per provider asked), no LLM calls. Prints each provider's outcome and inserted vs. skipped (duplicate) products; exits 1 when no provider delivers. Add `--job ID` to collect an earlier background search instead of starting one. |
+| `python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10` | The same for AliExpress through its RapidAPI failover chain (`config/aliexpress_providers.yaml`), no LLM calls; exits 1 when no provider delivers. |
 
 Other flags: `--limit N`, `--force` (ignore de-duplication), `--log-level`.
 Omit `--pipeline` to run every enabled pipeline. Exit codes: `0` ok, `1` failures,
@@ -262,6 +263,25 @@ ones its API supports. Details worth knowing:
 * A product without a photo in the API payload gets a labelled stand-in picture. The storefront shows
   it; the Instagram publisher refuses to post it.
 
+### AliExpress RapidAPI source (`aliexpress_rapidapi`)
+
+The same failover design as the Temu source, with its own chain in `config/aliexpress_providers.yaml`
+and adapters in `plugins/sources/aliexpress_providers/` (`AliExpressDataHubAdapter`,
+`AliExpressTrueApiAdapter`, `AliExpressUnofficialAdapter`, and the YAML-driven
+`GenericConfigurableAliExpressAdapter`). Providers are tried top to bottom and the walk stops at the first one
+that yields usable products; a missing key, HTTP 429 (remembered for the run), 401/403, timeout/5xx after two
+quick retries, an empty reply or a batch that fails the quality filter all move on to the next provider.
+
+| Variable | Purpose |
+| --- | --- |
+| `RAPIDAPI_KEY_ALI_1` … `_3` | One key per provider (falls back to `RAPIDAPI_KEY`); masked as `[REDACTED]` in logs. |
+| `ALIEXPRESS_TRACKING_ID` | Your Portals tracking id; empty = the API's promotion link, or the plain product URL. |
+| `ALIEXPRESS_AFFILIATE_URL_TEMPLATE` | Default `{url}?aff_fcid={tracking_id}&aff_platform=portals-tool`. A promotion link the API returns is kept as-is. |
+| `ALIEXPRESS_PROVIDERS_CONFIG_PATH` | The chain file; without it the same three providers are used. |
+
+A `--dry-run` spends no quota: it previews stored AliExpress products, else the `aliexpress_mock` catalogue.
+The dashboard's **AliExpress RapidAPI Provider Chain** card shows the order, key status and the last run.
+
 ### Instagram publisher (`instagram_pub`)
 
 Publishes through Meta's **Instagram API with Unified Login** (`https://graph.facebook.com/v21.0`, token in an
@@ -353,6 +373,7 @@ The suite needs no network, API keys or `.env`. Every test gets its own temporar
 | `test_instagram_publisher.py` | Instagram Unified Login: feed image, Reel backoff, Story image/video (no caption), Meta error hints, `--verify-instagram` and the dashboard button |
 | `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), the `gadgets_he` pipeline |
 | `test_temu_failover.py` | Temu provider chain: the 429 ➔ empty ➔ success failover, every failure mode, key fallback and exhausted-key memory, the four adapters, chain-file validation, key masking, the CLI summary |
+| `test_aliexpress_failover.py` | AliExpress provider chain: 429 ➔ empty ➔ success, 401/403, retries, missing keys and `RAPIDAPI_KEY` fallback, the four adapters, affiliate links, key masking, dry-run, `--seed-aliexpress` |
 
 The storefront website is checked by its own build: `cd storefront && npm run build` fails on any
 TypeScript error.

@@ -11,7 +11,8 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from string import Formatter
+from typing import Any, Callable, Literal, Mapping
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-from core.resilience import ConfigError, looks_like_secret
+from core.resilience import REDACTED, ConfigError, looks_like_secret, register_secret
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_FILE = BASE_DIR / ".env"
@@ -38,10 +39,56 @@ ENV_VAR_SUFFIX = "_env_var"
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PIPELINE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_\-]{1,63}")
 _LANGUAGE_RE = re.compile(r"[a-z]{2,3}(-[a-z0-9]{2,8})?")
+# RapidAPI keys: one shared key, plus optional per-provider keys that fall back to it.
+RAPIDAPI_FALLBACK_KEY_ENV = "RAPIDAPI_KEY"
+RAPIDAPI_KEY_PREFIX = "RAPIDAPI_KEY"
+ALIEXPRESS_KEY_ENVS = ("RAPIDAPI_KEY_ALI_1", "RAPIDAPI_KEY_ALI_2", "RAPIDAPI_KEY_ALI_3")
+DEFAULT_ALIEXPRESS_AFFILIATE_URL_TEMPLATE = "{url}?aff_fcid={tracking_id}&aff_platform=portals-tool"
 _RAW_SECRET_KEYS = {
     "token", "bot_token", "access_token", "api_key", "apikey", "secret",
     "client_secret", "password", "passwd", "authorization",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Affiliate links & RapidAPI keys
+# --------------------------------------------------------------------------- #
+def validate_affiliate_template(value: str) -> str:
+    """An affiliate URL template must contain ``{url}`` and may also use ``{tracking_id}``."""
+    try:
+        names = {name for _, name, _, _ in Formatter().parse(value) if name is not None}
+    except ValueError as exc:
+        raise ValueError(f"is not a valid template ({exc})") from exc
+    if "url" not in names or names - {"url", "tracking_id"}:
+        raise ValueError("must contain {url} and may only use the placeholders {url} and {tracking_id}")
+    return value
+
+
+def resolve_rapidapi_key(env_name: str, get_env: Callable[[str], str | None] | None = None) -> tuple[str | None, str | None]:
+    """``(key, name of the variable it came from)``: ``env_name`` first, then ``RAPIDAPI_KEY``.
+
+    A key that is found is registered with the log redactor, so it prints as ``[REDACTED]``
+    anywhere it would otherwise appear. Only the variable NAME should ever be logged.
+    """
+    get_env = get_env or Settings.get_env
+    for name in dict.fromkeys((env_name, RAPIDAPI_FALLBACK_KEY_ENV)):
+        value = get_env(name)
+        if value:
+            register_secret(value)
+            return value, name
+    return None, None
+
+
+def register_rapidapi_secrets(environ: Mapping[str, str] | None = None) -> None:
+    """Mask every ``RAPIDAPI_KEY*`` value (``RAPIDAPI_KEY_ALI_1`` …) in all log output."""
+    for name, value in (os.environ if environ is None else environ).items():
+        if name.upper().startswith(RAPIDAPI_KEY_PREFIX) and value and value.strip():
+            register_secret(value.strip())
+
+
+def masked(value: str | None) -> str:
+    """How a secret is shown in logs and status output: ``[REDACTED]`` or ``Missing``."""
+    return REDACTED if value else "Missing"
 
 
 # --------------------------------------------------------------------------- #
@@ -83,6 +130,12 @@ class Settings(BaseSettings):
     # Publisher plugin used to render --dry-run previews
     dry_run_publisher: str = "console_pub"
 
+    # AliExpress affiliate links (plugins/sources/aliexpress_rapidapi.py). Not secrets: the
+    # RapidAPI keys themselves (RAPIDAPI_KEY_ALI_1..3, RAPIDAPI_KEY) are read with
+    # resolve_rapidapi_key() and are never stored on this object.
+    aliexpress_tracking_id: str | None = None
+    aliexpress_affiliate_url_template: str = DEFAULT_ALIEXPRESS_AFFILIATE_URL_TEMPLATE
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _upper_log_level(cls, value: Any) -> Any:
@@ -99,6 +152,11 @@ class Settings(BaseSettings):
         """Relative paths are relative to the project, not to the caller's cwd."""
         value = value.expanduser()
         return value if value.is_absolute() else (BASE_DIR / value).resolve()
+
+    @field_validator("aliexpress_affiliate_url_template", mode="after")
+    @classmethod
+    def _affiliate_template(cls, value: str) -> str:
+        return validate_affiliate_template(value.strip())
 
     @field_validator("worker_timezone", mode="after")
     @classmethod
@@ -145,6 +203,7 @@ def load_settings(env_file: Path | str | None = ENV_FILE) -> Settings:
         # Real environment variables win over the file; values land in os.environ so
         # that ``*_env_var`` references in pipeline configs can be resolved at runtime.
         load_dotenv(env_file, override=False, encoding="utf-8")
+    register_rapidapi_secrets()
     try:
         return Settings()
     except ValidationError as exc:

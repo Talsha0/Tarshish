@@ -12,6 +12,8 @@ Examples
     python main.py --seed-storefront                                 # load the storefront demo catalogue
     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
                                                                      # real Temu products via the provider chain, no LLM
+    python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10
+                                                                     # real AliExpress products via the failover chain, no LLM
     python main.py --verify-instagram                                # read-only Instagram token / account / permission check
     python main.py --verify-instagram --pipeline gadgets_he          # check that pipeline's Instagram pages
 """
@@ -110,8 +112,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="load real Temu products into the storefront through the RapidAPI provider chain, no LLM calls "
              "(needs --category; --keyword and --limit are optional)",
     )
-    manage.add_argument("--category", metavar="NAME", help="with --seed-temu: storefront category to file the products under")
-    manage.add_argument("--keyword", metavar="TEXT", help="with --seed-temu: search terms (default: the category name)")
+    manage.add_argument(
+        "--seed-aliexpress", action="store_true",
+        help="load real AliExpress products into the storefront through the RapidAPI failover chain, no LLM calls "
+             "(needs --category; --keyword and --limit are optional)",
+    )
+    manage.add_argument(
+        "--category", metavar="NAME",
+        help="with --seed-temu / --seed-aliexpress: storefront category to file the products under",
+    )
+    manage.add_argument(
+        "--keyword", metavar="TEXT",
+        help="with --seed-temu / --seed-aliexpress: search terms (default: the category name)",
+    )
     manage.add_argument(
         "--job", metavar="ID",
         help="with --seed-temu: collect the results of an earlier search job instead of starting a new search",
@@ -182,8 +195,16 @@ def cmd_list_pipelines(engine) -> None:
     print(_RULE)
 
 
-def print_temu_seed(report, limit: int) -> None:
+_SEED_LABELS = {  # source plugin -> (store name, tracking variable, chain file)
+    "temu_rapidapi": ("Temu", "TEMU_TRACKING_ID", "config/temu_providers.yaml"),
+    "aliexpress_rapidapi": ("AliExpress", "ALIEXPRESS_TRACKING_ID", "config/aliexpress_providers.yaml"),
+}
+
+
+def print_seed(report, limit: int) -> None:
     from plugins import format_price, is_placeholder_image
+
+    store, tracking_var, chain_file = _SEED_LABELS.get(report.source, _SEED_LABELS["temu_rapidapi"])
 
     def row(mark: str, status: str, product) -> str:
         title = product.title if len(product.title) <= 38 else product.title[:37] + "…"
@@ -191,7 +212,7 @@ def print_temu_seed(report, limit: int) -> None:
                 f"{product.orders_count:>9,} sold {format_price(product.price, product.currency):>9}  {title}")
 
     print(_RULE)
-    print(f" Temu seed · category {report.category} · keyword \"{report.keyword}\" · "
+    print(f" {store} seed · category {report.category} · keyword \"{report.keyword}\" · "
           f"provider {report.provider or 'none delivered'} · no LLM calls")
     for attempt in report.attempts:
         print(f"   {'✓' if attempt.ok else '✗'} provider   {attempt.provider:<24} {attempt.outcome:<16} {attempt.detail}")
@@ -211,13 +232,13 @@ def print_temu_seed(report, limit: int) -> None:
     if report.notice:
         print(f"   ! API notice: {report.notice}")
     if any(product.affiliate_url == product.raw_url for product in report.inserted):
-        print("   ! TEMU_TRACKING_ID is not set: the stored links are plain product URLs, not affiliate links.")
+        print(f"   ! {tracking_var} is not set: the stored links are plain product URLs, not affiliate links.")
     stand_ins = sum(1 for product in report.inserted if any(is_placeholder_image(url) for url in product.image_urls))
     if stand_ins:
         print(f"   ! {stand_ins} product(s) came without a photo and show a stand-in picture until enriched.")
     if report.provider is None:
         print("   ! No provider delivered usable products. Check the provider lines above: add or renew a key,")
-        print("     subscribe the key to another API in config/temu_providers.yaml, or try broader search terms.")
+        print(f"     subscribe the key to another API in {chain_file}, or try broader search terms.")
     print(_RULE)
 
 
@@ -306,16 +327,21 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--mode worker consumes the queue; it cannot be combined with --pipeline/--limit/--dry-run/--force")
     if args.once and args.mode != "worker":
         parser.error("--once only applies to --mode worker")
-    if args.seed_temu:
+    if args.seed_temu and args.seed_aliexpress:
+        parser.error("run --seed-temu and --seed-aliexpress separately (they share --category/--keyword/--limit)")
+    if args.seed_temu or args.seed_aliexpress:
+        flag = "--seed-temu" if args.seed_temu else "--seed-aliexpress"
         if not args.category:
-            parser.error("--seed-temu needs --category NAME (for example: --category gadgets)")
+            parser.error(f"{flag} needs --category NAME (for example: --category gadgets)")
         if args.dry_run or args.mode:
-            parser.error("--seed-temu makes real API requests and writes products; "
+            parser.error(f"{flag} makes real API requests and writes products; "
                          "it cannot be combined with --dry-run or --mode")
+        if args.job and not args.seed_temu:
+            parser.error("--job only applies to --seed-temu (AliExpress searches answer at once)")
     elif args.verify_instagram and (args.dry_run or args.mode or args.limit or args.force):
         parser.error("--verify-instagram only reads from the API; it takes --pipeline and nothing else")
     elif args.category or args.keyword or args.job:
-        parser.error("--category, --keyword and --job only apply to --seed-temu")
+        parser.error("--category, --keyword and --job only apply to --seed-temu / --seed-aliexpress")
 
     try:
         from core import bootstrap
@@ -353,7 +379,15 @@ def main(argv: list[str] | None = None) -> int:
 
             limit = args.limit or 10
             report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
-            print_temu_seed(report, limit)
+            print_seed(report, limit)
+            failed = failed or report.provider is None
+        if args.seed_aliexpress:
+            management = True
+            from api.seed import seed_aliexpress
+
+            limit = args.limit or 10
+            report = seed_aliexpress(engine, category=args.category, keyword=args.keyword, limit=limit)
+            print_seed(report, limit)
             failed = failed or report.provider is None
         if args.flush_queue:
             management = True

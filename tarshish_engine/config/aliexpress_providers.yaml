@@ -1,0 +1,77 @@
+# AliExpress provider chain for the `aliexpress_rapidapi` source (plugins/sources/aliexpress_rapidapi.py).
+#
+# The providers are tried from top to bottom. The walk stops at the first one that returns
+# usable products, so the quota of the providers below it is not touched. A provider is
+# skipped (logged, never fatal) when its key is missing, on HTTP 429 / 401 / 403, on a
+# timeout or 5xx after two quick retries, and when it returns no items or none that pass
+# the quality filter (min_rating, min_orders, duplicates by canonical_hash).
+#
+# Keys never go in this file. `api_key_env` is the NAME of a variable in .env; when that
+# variable is empty the provider uses RAPIDAPI_KEY. One RapidAPI key works for every API
+# the account is subscribed to, so a single RAPIDAPI_KEY is enough to start with.
+#
+# More quota for one API: list it twice with two different `api_key_env` names (two
+# RapidAPI accounts). A key that answers 429 is remembered and not asked again in that run.
+#
+# This file is read on every run: no --sync-config needed. Restart the dashboard to see changes.
+# Adapters: AliExpressDataHubAdapter (datahub), AliExpressTrueApiAdapter (true_api),
+#           AliExpressUnofficialAdapter (unofficial), GenericConfigurableAliExpressAdapter (generic).
+
+providers:
+  # 1. "AliExpress DataHub": GET /item_search?q=&page=1&sort=&startPrice=&endPrice=
+  #    -> result.resultList[].item  (itemId, title, sku.def.promotionPrice, averageStarRate, sales, itemUrl, image)
+  - name: ali_primary_datahub
+    adapter: AliExpressDataHubAdapter
+    host: aliexpress-datahub.p.rapidapi.com
+    url: https://aliexpress-datahub.p.rapidapi.com/item_search
+    api_key_env: RAPIDAPI_KEY_ALI_1
+    enabled: true
+
+  # 2. "AliExpress True API": GET /api/v3/products?keywords=&page_no=&page_size=&min_sale_price=&max_sale_price=
+  #    -> products[] | data.products[]  (product_id, product_title, target_sale_price, evaluate_rate,
+  #       lastest_volume, promotion_link / product_detail_url, product_main_image_url)
+  #    A returned promotion_link is kept as the affiliate link.
+  - name: ali_secondary_trueapi
+    adapter: AliExpressTrueApiAdapter
+    host: aliexpress-true-api.p.rapidapi.com
+    url: https://aliexpress-true-api.p.rapidapi.com/api/v3/products
+    api_key_env: RAPIDAPI_KEY_ALI_2
+    enabled: true
+
+  # 3. "AliExpress Unofficial": GET /search?query=&page=&minPrice=&maxPrice=  ->  items[] | results[]
+  - name: ali_backup_unofficial
+    adapter: AliExpressUnofficialAdapter
+    host: aliexpress-unofficial.p.rapidapi.com
+    url: https://aliexpress-unofficial.p.rapidapi.com/search
+    api_key_env: RAPIDAPI_KEY_ALI_3
+    enabled: true
+
+  # Template for any other RapidAPI AliExpress endpoint — no Python needed. Uncomment and adapt.
+  # - name: ali_generic_example
+  #   adapter: generic
+  #   host: some-aliexpress-api.p.rapidapi.com
+  #   url: https://some-aliexpress-api.p.rapidapi.com/v1/search
+  #   api_key_env: RAPIDAPI_KEY_ALI_4
+  #   enabled: false
+  #   request:
+  #     # Placeholders: {keyword} {max_items} {page} {price_min} {price_max} {sort} {category_id}
+  #     #               {min_rating} {min_stars} {min_orders}. A parameter whose placeholder has no value is left out.
+  #     params:
+  #       q: "{keyword}"
+  #       limit: "{max_items}"
+  #       ship_to: US
+  #   response:
+  #     items: [data.items, items]          # dotted path(s) to the item list, tried in order
+  #     # item_root: item                   # when every entry wraps the product as {"item": {...}}
+  #     # price_divisor: 100                # for APIs that report prices in cents
+  #     fields:                             # normalised field -> path(s) inside one item
+  #       goods_id: id
+  #       title: title
+  #       price: [price.sale, price]
+  #       original_price: price.original
+  #       rating: rating                    # stars, or a percentage such as "96.4%" (converted to stars)
+  #       sales_volume: orders
+  #       raw_url: url
+  #       affiliate_url: promotion_url      # kept as-is when present
+  #       image_urls: [images, image]
+  #       category_hint: category

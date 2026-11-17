@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from core import bootstrap  # noqa: E402
 from core import resilience  # noqa: E402
 from core.config import Settings  # noqa: E402
-from plugins.sources import temu_providers  # noqa: E402
+from plugins.sources import aliexpress_providers, temu_providers  # noqa: E402
 
 _CREDENTIAL_VARS = (
     "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "TG_SPORTS_BOT_TOKEN", "TG_SPORTS_CHAT_ID",
@@ -25,6 +25,8 @@ _CREDENTIAL_VARS = (
     "TEMU_CURRENCY", "TEMU_JOB_TIMEOUT", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "INSTAGRAM_GRAPH_API_VERSION",
     "RAPIDAPI_KEY_TEMU_1", "RAPIDAPI_KEY_TEMU_2", "RAPIDAPI_KEY_TEMU_3", "RAPIDAPI_KEY_TEMU_4",
     "DRY_RUN_PUBLISHER",
+    "RAPIDAPI_KEY_ALI_1", "RAPIDAPI_KEY_ALI_2", "RAPIDAPI_KEY_ALI_3", "ALIEXPRESS_TRACKING_ID",
+    "ALIEXPRESS_AFFILIATE_URL_TEMPLATE", "ALIEXPRESS_MAX_ITEMS", "ALIEXPRESS_CURRENCY",
 )
 
 
@@ -39,6 +41,9 @@ def clean_environment(monkeypatch, tmp_path):
     # and no test inherits another one's "quota exhausted" memory.
     monkeypatch.setenv("TEMU_PROVIDERS_CONFIG_PATH", str(tmp_path / "no-such-temu-providers.yaml"))
     temu_providers.reset_run_state()
+    # The same for the AliExpress chain: the built-in chain unless a test names a file.
+    monkeypatch.setenv("ALIEXPRESS_PROVIDERS_CONFIG_PATH", str(tmp_path / "no-such-aliexpress-providers.yaml"))
+    aliexpress_providers.reset_run_state()
     slept: list[float] = []
     monkeypatch.setattr(resilience, "_sleep", slept.append)
     yield slept

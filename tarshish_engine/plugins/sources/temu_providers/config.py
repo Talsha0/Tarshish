@@ -19,6 +19,7 @@ from ruamel.yaml.error import YAMLError
 
 from core.config import BASE_DIR
 from core.resilience import ConfigError, looks_like_secret
+from plugins.sources._rapidapi_common import config_error
 
 GetEnv = Callable[[str], "str | None"]
 
@@ -42,15 +43,6 @@ MAPPABLE_FIELDS = (
 _NAME_RE = re.compile(r"[a-z0-9][a-z0-9_\-]{1,63}")
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HOST_RE = re.compile(r"(?=.{1,253}$)([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", re.I)
-
-
-def config_error(title: str, exc: ValidationError, rename: Callable[[str], str] = str) -> ConfigError:
-    """A ``ValidationError`` as a readable ``ConfigError`` (one line per field)."""
-    lines = [
-        f"  - {rename('.'.join(str(part) for part in err['loc']))}: {err['msg'].removeprefix('Value error, ')}"
-        for err in exc.errors()
-    ]
-    return ConfigError(f"{title}:\n" + "\n".join(lines))
 
 
 def _as_list(value: Any) -> Any:

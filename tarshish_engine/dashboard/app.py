@@ -510,26 +510,21 @@ def save_pipeline(
     st.rerun()
 
 
-# Outcome of asking one Temu provider, as the chain card words it.
-_TEMU_OUTCOMES = {
+# Outcome of asking one provider of a RapidAPI chain (Temu, AliExpress), as the chain cards word it.
+_PROVIDER_OUTCOMES = {
     "success": "✓ delivered", "missing_key": "✗ no API key", "quota_exhausted": "✗ quota used up (429)",
     "auth_failed": "✗ key rejected (401/403)", "unavailable": "✗ unreachable / 5xx", "empty": "✗ no items",
     "filtered_out": "✗ nothing passed the filter", "job_pending": "… search still running", "error": "✗ error",
 }
+_TEMU_OUTCOMES = _PROVIDER_OUTCOMES  # the original name
 
 
-def render_temu_provider_chain(engine: Engine) -> None:
-    """The Temu source's failover order, which API keys are present, and who answered last."""
-    try:
-        from plugins.sources.temu_providers import chain_status
-    except ImportError:  # the Temu source was removed: nothing to show
-        return
-
-    status = chain_status(engine.settings)
+def render_provider_chain_card(engine: Engine, title: str, store: str, status: dict[str, Any], builtin: str) -> None:
+    """One source's failover order, which API keys are present, and who answered last."""
     with st.container(border=True):
-        st.markdown("**Temu RapidAPI Provider Chain**")
+        st.markdown(f"**{title}**")
         if status["error"]:
-            st.error("The provider chain is not valid; the Temu source cannot fetch until it is fixed.")
+            st.error(f"The provider chain is not valid; the {store} source cannot fetch until it is fixed.")
             st.code(redact(status["error"]), language=None)
             return
 
@@ -552,7 +547,7 @@ def render_temu_provider_chain(engine: Engine) -> None:
             if not provider["enabled"]:
                 outcome = "switched off"
             elif provider["last_outcome"]:
-                outcome = _TEMU_OUTCOMES.get(provider["last_outcome"], provider["last_outcome"])
+                outcome = _PROVIDER_OUTCOMES.get(provider["last_outcome"], provider["last_outcome"])
                 if provider["last_outcome"] != "success" and provider["last_detail"]:
                     outcome += f" — {provider['last_detail']}"
             else:
@@ -564,8 +559,37 @@ def render_temu_provider_chain(engine: Engine) -> None:
              "api_key_env": "API key variable", "key_state": "Key in .env", "last": "Last run"},
             numeric=("order",), clipped=("last",),
         )
-        source = status["config_path"] if status["from_file"] else "built-in default (no temu_providers.yaml)"
+        source = status["config_path"] if status["from_file"] else f"built-in default (no {builtin})"
         st.caption(f"Order and endpoints: `{source}`. Keys are read from `.env`; restart the dashboard after changing it.")
+
+
+def render_temu_provider_chain(engine: Engine) -> None:
+    """The Temu source's failover order, which API keys are present, and who answered last."""
+    try:
+        from plugins.sources.temu_providers import chain_status
+    except ImportError:  # the Temu source was removed: nothing to show
+        return
+    render_provider_chain_card(
+        engine, "Temu RapidAPI Provider Chain", "Temu", chain_status(engine.settings), "temu_providers.yaml"
+    )
+
+
+def aliexpress_chain_status(engine: Engine) -> dict[str, Any] | None:
+    """The AliExpress chain status, or ``None`` when the AliExpress RapidAPI source is not installed."""
+    try:
+        from plugins.sources.aliexpress_providers import chain_status
+    except ImportError:
+        return None
+    return chain_status(engine.settings)
+
+
+def render_aliexpress_provider_chain(engine: Engine, status: dict[str, Any] | None = None) -> None:
+    """The AliExpress source's failover order, which API keys are present, and who answered last."""
+    status = status or aliexpress_chain_status(engine)
+    if status is not None:
+        render_provider_chain_card(
+            engine, "AliExpress RapidAPI Provider Chain", "AliExpress", status, "aliexpress_providers.yaml"
+        )
 
 
 def render_instagram_connection(engine: Engine) -> None:
@@ -601,6 +625,13 @@ def render_pipelines_tab(engine: Engine) -> None:
         render_pipeline_card(engine, pipeline)
     if any(pipeline.source == "temu_rapidapi" for pipeline in pipelines):
         render_temu_provider_chain(engine)
+    # Shown next to the Temu card, when a pipeline uses it, or once it has fetched (--seed-aliexpress).
+    ali_status = aliexpress_chain_status(engine)
+    if ali_status is not None and (
+        ali_status["last_run"]
+        or any(pipeline.source in ("aliexpress_rapidapi", "temu_rapidapi") for pipeline in pipelines)
+    ):
+        render_aliexpress_provider_chain(engine, ali_status)
     if any(page.platform == "instagram_pub" for pipeline in pipelines for page in pipeline.social_pages):
         render_instagram_connection(engine)
     st.divider()

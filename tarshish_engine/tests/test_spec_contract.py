@@ -76,7 +76,7 @@ def test_plugin_contracts_have_the_specified_members_and_signatures():
 
 def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
     # _mock_catalogue is data, not a plugin
-    assert engine.plugins.names("source") == ["aliexpress_mock", "temu_mock", "temu_rapidapi"]
+    assert engine.plugins.names("source") == ["aliexpress_mock", "aliexpress_rapidapi", "temu_mock", "temu_rapidapi"]
     assert engine.plugins.names("generator") == ["llm_text_gen", "video_gen_stub"]
     assert engine.plugins.names("publisher") == ["console_pub", "instagram_pub", "telegram_pub"]
     assert engine.plugins.names("storage") == ["cloud", "local"]
