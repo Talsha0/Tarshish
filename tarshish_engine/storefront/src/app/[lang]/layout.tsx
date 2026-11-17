@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Assistant, Frank_Ruhl_Libre } from "next/font/google";
+import { Frank_Ruhl_Libre, IBM_Plex_Sans_Hebrew } from "next/font/google";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 
@@ -9,9 +9,16 @@ import { LANGS, dirOf, getDictionary, isLang } from "@/lib/i18n";
 
 import "../globals.css";
 
-// Two families, both drawn for Hebrew and Latin. Assistant carries the interface and the
-// prices; Frank Ruhl Libre, the classic Hebrew book face, is kept for the headlines.
-const sans = Assistant({ subsets: ["hebrew", "latin"], variable: "--font-sans", display: "swap" });
+// Two families, both drawn for Hebrew and Latin. IBM Plex Sans Hebrew carries the interface
+// and the prices: crisp and even, with calligraphic touches in the Hebrew; it is not a
+// variable font, so only the weights in use are loaded (400 to 700, its heaviest). Frank
+// Ruhl Libre, the classic Hebrew book face, is kept for the headlines.
+const sans = IBM_Plex_Sans_Hebrew({
+  subsets: ["hebrew", "latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-sans",
+  display: "swap",
+});
 const display = Frank_Ruhl_Libre({
   subsets: ["hebrew", "latin"],
   weight: ["700", "900"],

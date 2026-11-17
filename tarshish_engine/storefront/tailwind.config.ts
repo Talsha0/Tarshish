@@ -49,7 +49,7 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ["var(--font-sans)", "Assistant", "system-ui", "Segoe UI", "Arial", "sans-serif"],
+        sans: ["var(--font-sans)", "IBM Plex Sans Hebrew", "system-ui", "Segoe UI", "Arial", "sans-serif"],
         display: ["var(--font-display)", "Frank Ruhl Libre", "Georgia", "Times New Roman", "serif"],
       },
       fontSize: {

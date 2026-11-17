@@ -95,7 +95,7 @@ export function RedirectConfirmModal({ lang, product, couponCopied, referrerPath
               <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-spruce/45 bg-spruce-tint/50 p-3.5">
                 <p className="min-w-0 text-sm text-ink-soft">
                   {t.redirect.couponRemind}{" "}
-                  <strong dir="ltr" className="font-extrabold tracking-[0.06em] text-ink">
+                  <strong dir="ltr" className="font-bold tracking-[0.06em] text-ink">
                     {deal.coupon_code}
                   </strong>
                 </p>

@@ -124,7 +124,7 @@
     padding-inline: calc(var(--point) + 0.72em) 0.6em;
     background: rgb(var(--tag));
     color: rgb(var(--tag-ink));
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.1;
     font-variant-numeric: tabular-nums lining-nums;
     white-space: nowrap;

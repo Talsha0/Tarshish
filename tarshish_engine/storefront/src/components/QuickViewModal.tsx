@@ -241,7 +241,7 @@ export function QuickViewModal({
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <p className="text-xs font-semibold text-ink-soft">{t.quickView.couponTitle}</p>
-                      <p dir="ltr" className="select-all truncate text-start text-xl font-extrabold tracking-[0.08em] text-ink rtl:text-end">
+                      <p dir="ltr" className="select-all truncate text-start text-xl font-bold tracking-[0.08em] text-ink rtl:text-end">
                         {product.coupon_code}
                       </p>
                     </div>
