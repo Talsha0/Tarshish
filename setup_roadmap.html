@@ -265,22 +265,41 @@
       environment active. Commands are written for Windows PowerShell; where Linux or macOS differs, the alternative is shown.</p>
   </header>
 
+  <section class="status" aria-label="How the engine works">
+    <div class="card" style="grid-column: 1 / -1">
+      <h3>🧭 Two decoupled stages</h3>
+      <p style="margin:4px 0 8px">Everything below follows the same two commands:</p>
+      <div class="cmd"><pre><code># Stage 1 · harvest — per category × store, once for every language, no AI cost
+python main.py --harvest [--source temu_rapidapi|aliexpress_rapidapi] [--category gadgets]
+
+# Stage 2 · publish — per category × language × content type, reads harvested products only
+python main.py --publish --category gadgets --lang he [--content-types instagram_post,instagram_story]</code></pre></div>
+      <p style="margin:8px 0 0;font-size:.9rem">Configuration has three parts, each a seed file in <code>config/</code>
+        and a tab of the dashboard: <strong>categories</strong> (search rules per store, in English),
+        <strong>content types</strong> (generator + AI model per <code>instagram_post</code>, <code>instagram_story</code>,
+        <code>tiktok_video</code>, <code>telegram_post</code>) and the <strong>social accounts</strong> matrix
+        (category × language × platform ➔ page and <code>.env</code> variable names).</p>
+    </div>
+  </section>
+
   <section class="status" aria-label="Where the project stands">
     <div class="card">
       <h3>✅ Working and tested</h3>
       <ul>
         <li>Engine core, CLI and SQLite store</li>
+        <li>Two-stage engine: harvest per category × store, publish per category × language × content type</li>
         <li>Two mock product sources (14 products, AliExpress and Temu)</li>
         <li>Offline Hebrew / English captions</li>
         <li>Console publisher, queue and worker</li>
-        <li>Streamlit dashboard, with live storefront clicks</li>
+        <li>Streamlit dashboard: categories, accounts matrix, model routing, targeted runs, KPIs, storefront clicks</li>
         <li>FindHub storefront: FastAPI backend, typo-tolerant search, Next.js site in Hebrew and English</li>
       </ul>
     </div>
     <div class="card">
       <h3>🔌 Built, not yet run live</h3>
       <ul>
-        <li>Claude and Gemini captions</li>
+        <li>Claude and Gemini captions, Story overlay hooks, video captions</li>
+        <li>Temu and AliExpress RapidAPI harvesting</li>
         <li>Telegram publisher</li>
         <li>Instagram publisher (feed posts, Reels, Stories) and its live connection check</li>
       </ul>
@@ -289,15 +308,14 @@
     <div class="card">
       <h3>🧱 Stubs to implement</h3>
       <ul>
-        <li>Video rendering</li>
+        <li>Video rendering (FFmpeg slideshow behind <code>VIDEO_RENDER_ENABLED</code>; render jobs otherwise)</li>
         <li>Cloud media storage</li>
       </ul>
     </div>
     <div class="card">
       <h3>➕ Not built yet</h3>
       <ul>
-        <li>Real product sources</li>
-        <li>TikTok, YouTube publishers</li>
+        <li>TikTok, YouTube publishers (TikTok accounts are in the matrix, disabled)</li>
         <li>Automatic metrics collection</li>
         <li>Dashboard login</li>
       </ul>
@@ -384,10 +402,14 @@ python --version</code></pre></div>
         <div class="step-body">
           <label class="step-title" for="cb-p1-db"><span class="step-num"></span> Create and seed the database</label>
           <p>There is no separate migration command. The first start creates <code>tarshish_engine.db</code> and copies
-            the pipelines from <code>config/pipelines.yaml</code> into it. From then on the database is the source of truth.</p>
-          <div class="cmd"><pre><code>python main.py --list-pipelines</code></pre></div>
-          <p class="note">Edited the YAML later? Push it into the database with <code>python main.py --sync-config</code>.</p>
-          <p class="done-when"><strong>Done when:</strong> the list shows <code>sports_he</code> as enabled and the
+            the three seed files — <code>config/categories.yaml</code>, <code>content_profiles.yaml</code> and
+            <code>social_accounts.yaml</code> — into it. From then on the database is the source of truth.</p>
+          <div class="cmd"><pre><code>python main.py --list-config</code></pre></div>
+          <p class="note">Edited a YAML file later? Push it into the database with <code>python main.py --sync-config</code>.
+            An older database is upgraded in place on this first start; its history is kept.</p>
+          <p class="done-when"><strong>Done when:</strong> the list shows the <code>gadgets</code> and <code>sports</code>
+            categories, the content types with their models (<code>instagram_post</code> on <code>claude-sonnet-5-5</code>,
+            <code>instagram_story</code> on <code>claude-haiku-5-5</code>) and the account matrix, and the
             <code>.db</code> file exists.</p>
         </div>
       </li>
@@ -395,13 +417,34 @@ python --version</code></pre></div>
       <li class="step" data-step="p1-dryrun">
         <input class="step-check" type="checkbox" id="cb-p1-dryrun">
         <div class="step-body">
-          <label class="step-title" for="cb-p1-dryrun"><span class="step-num"></span> Run the dry-run</label>
-          <p>Simulates the whole pipeline and prints the posts. Nothing is published, no AI is billed, nothing is written
-            to the database.</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --dry-run</code></pre></div>
-          <p class="note">A warning that the Telegram target is skipped is expected: its credentials come in Phase 2.</p>
-          <p class="done-when"><strong>Done when:</strong> you see three <code>DRY-RUN PREVIEW</code> cards with Hebrew
-            captions and a summary line ending in <code>failed 0</code>.</p>
+          <label class="step-title" for="cb-p1-dryrun"><span class="step-num"></span> Harvest, then dry-run both languages</label>
+          <p>Stage 1 fills <code>products</code> from the offline Temu catalogue — once, for every language. Stage 2 then
+            previews what each language's account would receive. Nothing is published, no AI is billed, and the dry-run
+            writes nothing.</p>
+          <div class="cmd"><pre><code>python main.py --harvest --source temu_mock --category gadgets
+python main.py --publish --category gadgets --lang he --content-types instagram_post,instagram_story --dry-run
+python main.py --publish --category gadgets --lang en --content-types instagram_post,instagram_story --dry-run</code></pre></div>
+          <p class="note">Warnings that the Instagram accounts lack credentials are expected: they come in the Instagram section.</p>
+          <p class="done-when"><strong>Done when:</strong> the harvest reports <code>inserted 3</code>; each dry-run shows
+            <code>instagram_post llm_text_gen [claude-sonnet-5-5]</code> and <code>instagram_story llm_story_gen
+            [claude-haiku-5-5]</code>, Hebrew going to <code>instagram_pub → gadgets</code> and English to
+            <code>instagram_pub → gadgets_en</code>, and ends with <code>previewed 6 · failed 0</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="p1-dashboard">
+        <input class="step-check" type="checkbox" id="cb-p1-dashboard">
+        <div class="step-body">
+          <label class="step-title" for="cb-p1-dashboard"><span class="step-num"></span> Launch the dashboard and link a console account</label>
+          <p>Leave it running in its own terminal and open a second terminal for the remaining steps.</p>
+          <div class="cmd"><pre><code>python -m streamlit run dashboard/app.py</code></pre></div>
+          <p>On <strong>Social Accounts</strong>, pick <code>gadgets</code> × <code>he</code> × type <code>console</code> as
+            the platform, enter <code>terminal</code> as the handle (no variables needed) and <strong>Save account</strong>.
+            This free local channel prints posts to the terminal; the <code>console_post</code> content type writes them.</p>
+          <p class="note">The shorter <code>streamlit run dashboard/app.py</code> is the same command; the <code>python -m</code> form is the one Windows does not block.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> shows the four tabs, the
+            matrix has a ✅ <code>terminal</code> cell for gadgets × Hebrew, and <strong>Run Pipelines &amp; KPIs → ▶ Run
+            pipeline</strong> (dry-run on) returns the Hebrew posts and Stories.</p>
         </div>
       </li>
 
@@ -409,24 +452,13 @@ python --version</code></pre></div>
         <input class="step-check" type="checkbox" id="cb-p1-live-console">
         <div class="step-body">
           <label class="step-title" for="cb-p1-live-console"><span class="step-num"></span> Publish for real, to the console</label>
-          <p>A live run, but the only working target is your own terminal. This one does write to the database.</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1
+          <p>A live run, but the only working account is your own terminal. This one does write to the database.</p>
+          <div class="cmd"><pre><code>python main.py --publish --category gadgets --lang he --content-types console_post --mode immediate --limit 1
 python main.py --stats</code></pre></div>
-          <p class="note">Run it again and you get the next product: nothing is posted twice. <code>--force</code> overrides that.</p>
-          <p class="done-when"><strong>Done when:</strong> the stats show <code>Published : 1</code>.</p>
-        </div>
-      </li>
-
-      <li class="step" data-step="p1-dashboard">
-        <input class="step-check" type="checkbox" id="cb-p1-dashboard">
-        <div class="step-body">
-          <label class="step-title" for="cb-p1-dashboard"><span class="step-num"></span> Launch the dashboard</label>
-          <p>Leave it running in its own terminal and open a second terminal for the remaining steps.</p>
-          <div class="cmd"><pre><code>python -m streamlit run dashboard/app.py</code></pre></div>
-          <p class="note">The shorter <code>streamlit run dashboard/app.py</code> is the same command; the <code>python -m</code> form is the one Windows does not block.</p>
-          <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8501</code> shows the
-            <code>sports_he</code> flow card, the "Run Pipeline Now (Dry-Run)" button returns three captions, and
-            the Queue &amp; Logs tab lists the post from the previous step.</p>
+          <p class="note">Run it again and you get the next product: an account never receives the same product twice in the
+            same content type. <code>--force</code> overrides that.</p>
+          <p class="done-when"><strong>Done when:</strong> the stats show <code>Published : 1</code> and the dashboard's
+            Queue &amp; Logs lists the post under pipeline <code>gadgets_he</code>.</p>
         </div>
       </li>
 
@@ -441,7 +473,7 @@ WORKER_ACTIVE_HOURS_END=24
 WORKER_MIN_DELAY_SECONDS=5
 WORKER_MAX_DELAY_SECONDS=15</code></pre></div>
           <p>Then queue the remaining products and start the worker. Stop it with <kbd>Ctrl</kbd>+<kbd>C</kbd>.</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode queued
+          <div class="cmd"><pre><code>python main.py --publish --category gadgets --lang he --content-types console_post --mode queued
 python main.py --mode worker</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> the worker prints the queued posts a few seconds apart and
             <code>python main.py --stats</code> shows an empty queue. Afterwards restore the four values
@@ -453,8 +485,9 @@ python main.py --mode worker</code></pre></div>
     <h3 class="group">FindHub storefront</h3>
     <p class="phase-intro">The public deal site. It is the third layer of the system, and all three read and write the
       same <code>tarshish_engine.db</code>:</p>
-    <div class="cmd"><pre><code># 1. Pipeline engine: fetches products, writes posts          (any terminal, on demand)
-python main.py --pipeline sports_he --mode immediate --dry-run
+    <div class="cmd"><pre><code># 1. Engine: harvests products, writes and publishes posts    (any terminal, on demand)
+python main.py --harvest --source temu_mock --category gadgets
+python main.py --publish --category gadgets --lang he --dry-run
 
 # 2. Storefront backend: products, search, click tracking     (terminal A, leave running)
 python -m uvicorn api.server:app --reload --port 8000
@@ -534,9 +567,10 @@ npm run dev</code></pre></div>
         <dd>Make sure you run them from the <code>tarshish_engine</code> folder, where <code>pytest.ini</code>
           keeps test files inside the project.</dd>
         <dt><code>[CONFIG ERROR]</code></dt>
-        <dd>The message names the exact variable in <code>.env</code> or field in <code>pipelines.yaml</code> that is invalid. Fix it and rerun.</dd>
-        <dt>The dry-run says <code>skipped 3</code> and shows no cards</dt>
-        <dd>Those products were already published. Add <code>--force</code> to preview them anyway.</dd>
+        <dd>The message names the exact variable in <code>.env</code>, or the file and row of <code>config/</code> (for example <code>categories 'gadgets' → min_rating</code>), that is invalid. Fix it and rerun.</dd>
+        <dt>A publish run shows no cards and warns "no harvested … product is waiting"</dt>
+        <dd>Either nothing is harvested for that category yet (run <code>--harvest</code>), or that account already received
+          every product in that content type. Add <code>--force</code> to preview them anyway.</dd>
         <dt>The storefront says "The deals could not be loaded"</dt>
         <dd>The website is up but the backend is not. Start it (step 1.12) and press "Try again". If the backend runs
           on another address, put it in <code>storefront/.env.local</code> as <code>API_ORIGIN=…</code> and restart
@@ -574,9 +608,10 @@ npm run dev</code></pre></div>
           <div class="cmd"><pre><code>ANTHROPIC_API_KEY=sk-ant-...
 GEMINI_API_KEY=...</code></pre></div>
           <p>Confirm the key is picked up without spending anything:</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --dry-run --force</code></pre></div>
+          <div class="cmd"><pre><code>python main.py --publish --category gadgets --lang he --dry-run --force</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> the <code>Content</code> line of each card reads
-            <code>offline-template [dry-run stand-in for claude-opus-5-5]</code> instead of "not set".</p>
+            <code>offline-template [dry-run stand-in for claude-sonnet-5-5]</code> (or <code>claude-haiku-5-5</code> for
+            Stories) instead of "not set".</p>
         </div>
       </li>
 
@@ -584,13 +619,15 @@ GEMINI_API_KEY=...</code></pre></div>
         <input class="step-check" type="checkbox" id="cb-p2-model-budget">
         <div class="step-body">
           <label class="step-title" for="cb-p2-model-budget"><span class="step-num"></span> Choose the model and the monthly cap</label>
-          <p>In the dashboard open Pipelines, pick <code>sports_he</code> in "Create / edit pipeline" and set
-            <strong>LLM model</strong>. The default is <code>claude-opus-5-5</code>. Cheaper choices:
-            <code>claude-sonnet-5-5</code>, <code>claude-haiku-5-5</code>, <code>gemini-3.5-flash-lite</code>.
+          <p>In the dashboard open <strong>Content Types &amp; AI Models</strong> and set the <strong>LLM model</strong> of each
+            content type. Shipped: <code>claude-sonnet-5-5</code> for feed posts and TikTok captions,
+            <code>claude-haiku-5-5</code> for Story hooks and Telegram posts. Other choices: <code>claude-opus-5-5</code>,
+            <code>gemini-3.5-flash-lite</code>, or type any model id. One change applies to every category and language.
             Then set the spending cap in <code>.env</code>:</p>
           <div class="cmd"><pre><code>MAX_MONTHLY_AI_BUDGET_USD=5.0</code></pre></div>
           <p class="note">When the month's spend reaches the cap, every run that needs a paid model stops with exit code 3.</p>
-          <p class="done-when"><strong>Done when:</strong> the pipeline card shows the model you chose.</p>
+          <p class="done-when"><strong>Done when:</strong> the content-type table and <code>python main.py --list-config</code>
+            show the models you chose.</p>
         </div>
       </li>
 
@@ -601,8 +638,10 @@ GEMINI_API_KEY=...</code></pre></div>
             <span class="tag money">costs money</span><span class="tag live">first live call</span></label>
           <p>One product, one request. This is the first time the AI integration talks to the real service, so read
             the result carefully.</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1 --force
+          <div class="cmd"><pre><code>python main.py --publish --category gadgets --lang he --content-types console_post --mode immediate --limit 1 --force
 python main.py --stats</code></pre></div>
+          <p class="note">First set <code>console_post</code>'s model to a paid one (for example <code>claude-haiku-5-5</code>)
+            in the Content Types tab, so the caption is written by the real service but only printed to your terminal.</p>
           <p class="note">If the request is rejected, the error line names the HTTP status. A 401 means the key is wrong;
             a 404 means the model id is not available to your account.</p>
           <p class="done-when"><strong>Done when:</strong> the caption is natural Hebrew rather than the template,
@@ -632,12 +671,13 @@ python main.py --stats</code></pre></div>
             numeric id (it starts with <code>-100</code>) for a private one.</p>
           <div class="cmd"><pre><code>TG_SPORTS_BOT_TOKEN=123456789:AA...
 TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
-          <p>In the dashboard, edit the pipeline's social page and replace the placeholder name
-            <code>@my_sports_channel</code> with your real channel name. Do it <strong>before the first post</strong>:
-            the engine treats a renamed page as a new page and would post everything to it again.</p>
+          <p>In the dashboard's <strong>Social Accounts</strong> tab, edit <code>sports</code> × <code>he</code> ×
+            <code>telegram</code> and replace the placeholder handle <code>@my_sports_channel</code> with your real channel
+            name. Do it <strong>before the first post</strong>: the engine treats a renamed page as a new page and would
+            post everything to it again.</p>
           <p class="note">Restart the dashboard after editing <code>.env</code>; it reads the file at startup.</p>
-          <p class="done-when"><strong>Done when:</strong> a dry-run prints no "skipped" warning for Telegram and the
-            dashboard card shows the Telegram page as <code>✅ ready</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> the matrix shows the sports × Hebrew × telegram cell as
+            <code>✅ ready</code>.</p>
         </div>
       </li>
 
@@ -646,8 +686,9 @@ TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
         <div class="step-body">
           <label class="step-title" for="cb-p2-telegram-post"><span class="step-num"></span> Send the first real post
             <span class="tag live">first live call</span></label>
-          <p>Products already shown on the console are sent to the new Telegram page only; nothing is repeated on the console.</p>
-          <div class="cmd"><pre><code>python main.py --pipeline sports_he --mode immediate --limit 1</code></pre></div>
+          <p>Harvest the sports category from the offline AliExpress catalogue, then publish one Telegram post.</p>
+          <div class="cmd"><pre><code>python main.py --harvest --source aliexpress_mock --category sports
+python main.py --publish --category sports --lang he --content-types telegram_post --mode immediate --limit 1</code></pre></div>
           <p class="note">The mock products carry placeholder images and fake affiliate links. Keep this channel private
             until a real product source is in place.</p>
           <p class="done-when"><strong>Done when:</strong> the post appears in your channel with a photo, the caption,
@@ -658,13 +699,18 @@ TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
       <li class="step" data-step="p2-real-source">
         <input class="step-check" type="checkbox" id="cb-p2-real-source">
         <div class="step-body">
-          <label class="step-title" for="cb-p2-real-source"><span class="step-num"></span> Replace the mock source with a real product feed
-            <span class="tag build">needs building</span></label>
-          <p>Write <code>plugins/sources/&lt;name&gt;.py</code> with one class that extends <code>BaseSource</code> and
-            returns <code>Product</code> objects carrying your real affiliate links (AliExpress Affiliate API, Amazon,
-            Admitad). Use <code>aliexpress_mock.py</code> as the template. Then pick the new plugin under
-            <strong>Source plugin</strong> in the dashboard. Nothing in <code>core/</code> changes.</p>
-          <p class="done-when"><strong>Done when:</strong> a dry-run previews real products with working links.</p>
+          <label class="step-title" for="cb-p2-real-source"><span class="step-num"></span> Harvest real products
+            <span class="tag live">spends API quota</span></label>
+          <p>Put a RapidAPI key and your affiliate tracking ids in <code>.env</code> (<code>RAPIDAPI_KEY</code>,
+            <code>TEMU_TRACKING_ID</code>, <code>ALIEXPRESS_TRACKING_ID</code>), check each category's search rules in the
+            <strong>Categories &amp; Search</strong> tab, then harvest. Each category is searched once per store — publishing
+            it in Hebrew and English costs no extra search.</p>
+          <div class="cmd"><pre><code>python main.py --harvest --category gadgets
+python main.py --stats</code></pre></div>
+          <p class="note">Another store is one file: <code>plugins/sources/&lt;name&gt;.py</code> extending <code>BaseSource</code>,
+            then <code>--harvest --source &lt;name&gt;</code>. Nothing in <code>core/</code> changes.</p>
+          <p class="done-when"><strong>Done when:</strong> the harvest names the provider that delivered, the stats list
+            <code>gadgets/temu</code> and <code>gadgets/aliexpress</code> products, and a publish dry-run previews them.</p>
         </div>
       </li>
 
@@ -675,11 +721,14 @@ TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
             <span class="tag build">needs building</span></label>
           <p>Video platforms need three pieces that are not written yet:</p>
           <p>1. A publisher: <code>plugins/publishers/tiktok_pub.py</code> extending <code>BasePublisher</code>, declaring
-            its <code>required_credentials</code> and <code>default_env_vars</code>.<br>
-            2. Real rendering: implement <code>_render</code> in <code>plugins/generators/video_gen_stub.py</code> (FFmpeg or MoviePy).<br>
+            its <code>required_credentials</code> and <code>default_env_vars</code>. The <code>tiktok_video</code> content type
+            and the (gadgets, he/en, tiktok) accounts already exist, disabled — enable them in the matrix.<br>
+            2. Rendering: <code>ffmpeg_video_gen</code> renders a 9:16 slideshow when <code>VIDEO_RENDER_ENABLED=true</code> and
+            <code>ffmpeg</code> is installed (otherwise it writes render jobs to <code>output/render_jobs/</code>).<br>
             3. Public media hosting: implement <code>storage/cloud_storage_stub.py</code> and set <code>STORAGE_MODE=cloud</code>.</p>
           <p class="note">TikTok's posting API requires an approved developer app. Start that application early; approval takes time.</p>
-          <p class="done-when"><strong>Done when:</strong> a dry-run of a pipeline that uses the new plugins shows its page as ready.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>python main.py --publish --category gadgets --lang he
+            --content-types tiktok_video --dry-run</code> shows the TikTok account as ready.</p>
         </div>
       </li>
 
@@ -687,8 +736,8 @@ TG_SPORTS_CHAT_ID=@your_channel</code></pre></div>
         <input class="step-check" type="checkbox" id="cb-p2-queued-mode">
         <div class="step-body">
           <label class="step-title" for="cb-p2-queued-mode"><span class="step-num"></span> Switch to queued publishing with human pacing</label>
-          <p>In the dashboard set the pipeline's <strong>Publishing mode</strong> to <code>queued</code>. Confirm
-            <code>.env</code> holds production pacing and your audience's timezone:</p>
+          <p><code>--publish</code> queues by default (<code>PUBLISHING_MODE=queued</code>); the worker then posts with human
+            pacing. Confirm <code>.env</code> holds production pacing and your audience's timezone:</p>
           <div class="cmd"><pre><code>WORKER_TIMEZONE=Asia/Jerusalem
 WORKER_ACTIVE_HOURS_START=9
 WORKER_ACTIVE_HOURS_END=22
@@ -749,14 +798,17 @@ systemctl status tarshish-worker</code></pre></div>
         <input class="step-check" type="checkbox" id="cb-p2-cron">
         <div class="step-body">
           <label class="step-title" for="cb-p2-cron"><span class="step-num"></span> Schedule content generation with cron</label>
-          <p>The worker only publishes; something has to fill the queue. Open <code>crontab -e</code> and add a line
-            that runs every enabled pipeline three times a day:</p>
-          <div class="cmd"><pre><code>0 8,13,18 * * * cd /opt/tarshish/tarshish_engine &amp;&amp; .venv/bin/python main.py --mode queued &gt;&gt; logs/cron.log 2&gt;&amp;1</code></pre></div>
+          <p>The worker only publishes; something has to harvest and fill the queue. Open <code>crontab -e</code> and add
+            two lines: a daily harvest (Stage 1, spends API quota once per category and store) and a publishing run
+            (Stage 2, every category × language with an enabled account) three times a day:</p>
+          <div class="cmd"><pre><code>30 6 * * * cd /opt/tarshish/tarshish_engine &amp;&amp; .venv/bin/python main.py --harvest &gt;&gt; logs/cron.log 2&gt;&amp;1
+0 8,13,18 * * * cd /opt/tarshish/tarshish_engine &amp;&amp; .venv/bin/python main.py --publish --mode queued &gt;&gt; logs/cron.log 2&gt;&amp;1</code></pre></div>
           <details>
             <summary>Staying on Windows instead? Use Task Scheduler</summary>
-            <p class="note">Replace <code>C:\path\to</code> with the real folder. The first task fills the queue daily,
-              the second starts the worker when you log on.</p>
-            <div class="cmd"><pre><code>schtasks /Create /TN "Tarshish pipelines" /SC DAILY /ST 08:00 /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --mode queued"
+            <p class="note">Replace <code>C:\path\to</code> with the real folder. The first two tasks harvest and fill the
+              queue daily, the third starts the worker when you log on.</p>
+            <div class="cmd"><pre><code>schtasks /Create /TN "Tarshish harvest" /SC DAILY /ST 06:30 /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --harvest"
+schtasks /Create /TN "Tarshish publish" /SC DAILY /ST 08:00 /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --publish --mode queued"
 schtasks /Create /TN "Tarshish worker" /SC ONLOGON /TR "\"C:\path\to\tarshish_engine\.venv\Scripts\python.exe\" \"C:\path\to\tarshish_engine\main.py\" --mode worker"</code></pre></div>
           </details>
           <p class="done-when"><strong>Done when:</strong> after the next scheduled time, <code>logs/cron.log</code>
@@ -768,7 +820,7 @@ schtasks /Create /TN "Tarshish worker" /SC ONLOGON /TR "\"C:\path\to\tarshish_en
         <input class="step-check" type="checkbox" id="cb-p2-dashboard-access">
         <div class="step-body">
           <label class="step-title" for="cb-p2-dashboard-access"><span class="step-num"></span> Reach the dashboard safely</label>
-          <p><strong>The dashboard has no login.</strong> Anyone who can open it can edit pipelines and flush the queue,
+          <p><strong>The dashboard has no login.</strong> Anyone who can open it can edit categories, accounts and models, start runs and flush the queue,
             so never expose its port to the internet. Bind it to the server itself and connect through an SSH tunnel:</p>
           <div class="cmd"><pre><code>.venv/bin/python -m streamlit run dashboard/app.py --server.address 127.0.0.1 --server.headless true</code></pre></div>
           <div class="cmd"><pre><code>ssh -L 8501:127.0.0.1:8501 you@your-server</code></pre></div>
@@ -845,7 +897,7 @@ python main.py --retry-failed</code></pre></div>
         <div class="step-body">
           <label class="step-title" for="cb-p2-monthly-review"><span class="step-num"></span> Review budget and profit every month</label>
           <p>On the KPIs &amp; Budget tab compare <strong>Net profit</strong> with <strong>AI spend</strong> and look at
-            how full the budget meter got. If spend outruns revenue, move the pipeline to a cheaper model before raising the cap.</p>
+            how full the budget meter got. If spend outruns revenue, move a content type to a cheaper model (the "By content type" breakdown shows which one costs most) before raising the cap.</p>
           <p class="done-when"><strong>Done when:</strong> you have made one model or budget decision based on a full month of numbers.</p>
         </div>
       </li>
@@ -853,11 +905,13 @@ python main.py --retry-failed</code></pre></div>
       <li class="step" data-step="p2-next-pipeline">
         <input class="step-check" type="checkbox" id="cb-p2-next-pipeline">
         <div class="step-body">
-          <label class="step-title" for="cb-p2-next-pipeline"><span class="step-num"></span> Add the next pipeline</label>
-          <p>A new category or language is configuration, not code. In the dashboard choose "Create a new pipeline", give
-            it its own id, product type, language and social page (with its own <code>.env</code> variable names), save, and
-            run its dry-run.</p>
-          <p class="done-when"><strong>Done when:</strong> two pipelines run side by side, each posting to its own page.</p>
+          <label class="step-title" for="cb-p2-next-pipeline"><span class="step-num"></span> Add the next category or language</label>
+          <p>Both are configuration, not code. A <strong>category</strong>: add it on <strong>Categories &amp; Search</strong> with
+            its English Temu / AliExpress keywords and press <strong>Harvest Now</strong>. A <strong>language</strong>: link
+            one account per platform for it on <strong>Social Accounts</strong> (each with its own <code>.env</code>
+            variable names). The products and model routing are shared, so nothing else is set up twice.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>python main.py --publish --category &lt;id&gt; --dry-run</code>
+            previews every language, each going to its own account.</p>
         </div>
       </li>
 
@@ -957,7 +1011,7 @@ instagram_business_content_publish</code></pre></div>
           <p>The account id (<code>INSTAGRAM_BUSINESS_ACCOUNT_ID</code>) is the Instagram account's numeric
             <em>IG User</em> id, usually starting with <code>178414</code>. It is shown under the Instagram account in
             Business Settings, or returned by the Graph API Explorer for the token.</p>
-          <p class="note">Treat the token like a password: never paste it into <code>config/pipelines.yaml</code>, the
+          <p class="note">Treat the token like a password: never paste it into <code>config/social_accounts.yaml</code>, the
             dashboard, a chat or a commit.</p>
           <p class="done-when"><strong>Done when:</strong> you hold a token that Meta's
             <a href="https://developers.facebook.com/tools/debug/accesstoken/">Access Token Debugger</a> shows as valid
@@ -972,12 +1026,14 @@ instagram_business_content_publish</code></pre></div>
             <code>.env</code></label>
           <div class="cmd"><pre><code>INSTAGRAM_ACCESS_TOKEN=EAAG...
 INSTAGRAM_BUSINESS_ACCOUNT_ID=17841400000000000</code></pre></div>
-          <p>The <code>gadgets_he</code> pipeline already references these two variable names. To publish Stories as
-            well as feed posts, add a second Instagram social page with the option <code>content_type: "story"</code>
-            (or <code>"reel"</code> for Reels only); the engine reads every value from <code>.env</code> and masks the
-            token as <code>[REDACTED]</code> in logs.</p>
+          <p>The (gadgets, he, instagram) account already references these two variable names; the English account
+            (gadgets, en, instagram) uses <code>INSTAGRAM_ACCESS_TOKEN_GADGETS_EN</code> and
+            <code>INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN</code> — add those too for a separate English page. Feed posts and
+            Stories go to the same account: the <code>instagram_post</code> and <code>instagram_story</code> content types
+            each ask for their own format. The engine reads every value from <code>.env</code> and masks the token as
+            <code>[REDACTED]</code> in logs.</p>
           <p class="note">Restart the dashboard after editing <code>.env</code>; it reads the file at startup.</p>
-          <p class="done-when"><strong>Done when:</strong> a dry-run of <code>gadgets_he</code> prints no "skipped"
+          <p class="done-when"><strong>Done when:</strong> <code>python main.py --publish --category gadgets --lang he --dry-run</code> prints no "skipped"
             warning for <code>instagram_pub</code>.</p>
         </div>
       </li>
@@ -1003,9 +1059,9 @@ INSTAGRAM_BUSINESS_ACCOUNT_ID=17841400000000000</code></pre></div>
           <label class="step-title" for="cb-ig-verify"><span class="step-num"></span> Verify the connection before
             enabling live publishing <span class="tag live">read-only live call</span></label>
           <p>This checks the token, the Professional account type and both permissions. It never posts anything. The
-            dashboard's <strong>Test Instagram Connection</strong> button on the Pipelines tab runs the same check.</p>
+            dashboard's <strong>Test Instagram Connection</strong> button on the Social Accounts tab runs the same check.</p>
           <div class="cmd"><pre><code>python main.py --verify-instagram
-python main.py --verify-instagram --pipeline gadgets_he</code></pre></div>
+python main.py --verify-instagram --category gadgets --lang he</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> the report reads
             <code>Connected as @your_account | BUSINESS | Permissions: ✓ instagram_business_basic, ✓ instagram_business_content_publish</code>
             and ends with <code>Ready for live publishing.</code></p>

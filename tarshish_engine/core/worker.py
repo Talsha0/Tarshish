@@ -24,7 +24,7 @@ from core.config import Settings, SocialPage
 from core.database import Database
 from core.interfaces import BasePublisher, PluginContext
 from core.models import GeneratedContent, PublishReceipt, utcnow
-from core.registry import PipelineRegistry
+from core.registry import ConfigRegistry
 from core.resilience import get_logger, redact
 
 logger = get_logger("worker")
@@ -154,7 +154,7 @@ class QueueWorker:
         self,
         settings: Settings,
         db: Database,
-        registry: PipelineRegistry,
+        registry: ConfigRegistry,
         scheduler: JitterScheduler | None = None,
         *,
         clock: Callable[[], datetime] = utcnow,

@@ -1,0 +1,47 @@
+# Content types & AI model routing — Stage 2.
+#
+# Each content type names the generator plugin that produces it, the LLM model that writes it,
+# the platform it is published on and the format the publisher is asked for. Every language and
+# category uses the same routing, so a model is changed in exactly one place.
+#
+# llm_model: a model id (claude-*, gemini-*), a provider alias (anthropic, gemini) or "mock"
+# (free offline templates). Without the provider's API key the generator falls back to the
+# offline templates automatically. Seeds the `content_profiles` table (dashboard: Content Types).
+
+content_profiles:
+  - content_type: "instagram_post"     # feed image post with a full caption + hashtags
+    platform: "instagram"
+    generator: "llm_text_gen"
+    llm_model: "claude-sonnet-5-5"
+    publish_format: "image"
+    tone: "warm, upbeat and trustworthy — like a friend sharing a genuinely good deal"
+    enabled: true
+
+  - content_type: "instagram_story"    # concise overlay hook + vertical 9:16 frame (Stories take no caption)
+    platform: "instagram"
+    generator: "llm_story_gen"
+    llm_model: "claude-haiku-5-5"
+    publish_format: "story"
+    tone: "punchy and playful, three seconds to read"
+    enabled: true
+
+  - content_type: "tiktok_video"       # vertical slideshow (FFmpeg) + TikTok caption
+    platform: "tiktok"
+    generator: "ffmpeg_video_gen"
+    llm_model: "claude-sonnet-5-5"
+    publish_format: "video"
+    tone: "energetic, spoken-style, hook in the first words"
+    enabled: true
+
+  - content_type: "telegram_post"      # text post with the affiliate link
+    platform: "telegram"
+    generator: "llm_text_gen"
+    llm_model: "claude-haiku-5-5"
+    tone: "friendly and to the point"
+    enabled: true
+
+  - content_type: "console_post"       # local preview channel: prints to the terminal, free, no credentials.
+    platform: "console"                # Runs only where a (category, language, console) account is linked;
+    generator: "llm_text_gen"          # none ships, so production runs are unaffected.
+    llm_model: "mock"
+    enabled: true

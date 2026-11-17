@@ -30,19 +30,18 @@ Environment variables (see ``.env.example``)::
 A promotion link the API already returns (``promotion_link``) is kept as the product's
 affiliate link; the template is applied only to plain product URLs.
 
-Per-pipeline search terms live in the pipeline's ``options``::
+Search terms are a category's ``aliexpress_search`` rules (``config/categories.yaml`` ➔
+``categories.aliexpress_search_json``), handed over by the harvester as ``options.search_config``::
 
-    options:
-      search_config:
-        keyword: "smart watch"         # default: the pipeline's category
-        priceMin: 5
-        priceMax: 80
-        sort: "salesDesc"              # passed to the providers that support sorting
-        categoryId: "200000343"        # passed to generic providers that map {category_id}
-        skip_published: false          # true: drop (not just rank last) products this pipeline already handled
+    aliexpress_search:
+      keyword: "smart gadgets"       # default: the category id
+      priceMin: 5
+      priceMax: 80
+      sort: "salesDesc"              # passed to the providers that support sorting
+      categoryId: "200000343"        # passed to generic providers that map {category_id}
 
 A ``--dry-run`` never spends quota: it previews the AliExpress products already stored
-in SQLite for the category (``python main.py --seed-aliexpress`` puts them there), or the
+in SQLite for the category (``python main.py --harvest`` puts them there), or the
 ``aliexpress_mock`` catalogue when nothing is stored yet.
 """
 
@@ -168,7 +167,7 @@ class AliExpressSettings(BaseModel):
 
 
 class AliExpressSearch(BaseModel):
-    """``options.search_config`` of a pipeline."""
+    """A category's AliExpress search rules, ``options.search_config``."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, str_strip_whitespace=True)
 
@@ -277,8 +276,7 @@ class AliExpressRapidApiSource(BaseSource):
         try:
             return AliExpressSearch.model_validate(raw)
         except ValidationError as exc:
-            pipeline = self.context.pipeline_id or "?"
-            raise config_error(f"Pipeline '{pipeline}': invalid options.search_config", exc) from None
+            raise config_error("Invalid aliexpress_search rules of the category", exc) from None
 
     # -- contract ------------------------------------------------------------------- #
     def fetch_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:

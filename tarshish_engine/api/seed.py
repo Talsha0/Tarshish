@@ -10,7 +10,9 @@ a pipeline already stored keep their ids, publications and click history.
     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
 
 Loads real Temu products through the ``temu_rapidapi`` source and its provider chain
-(see ``seed_temu``).
+(see ``seed_temu``). Both are ad-hoc aliases of the Stage 1 harvester —
+``python main.py --harvest --source temu_rapidapi --category gadgets`` — that let you
+override the category's keyword for one run.
 
     python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10
 
@@ -19,12 +21,13 @@ The same for AliExpress through the ``aliexpress_rapidapi`` failover chain (see 
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from core.config import CategoryConfig
 from core.database import Database
-from core.interfaces import PluginContext
-from core.models import Product
+from core.harvester import HarvestReport
+from core.models import category_slug
+from core.resilience import PipelineError
 from plugins.sources._mock_catalogue import seed_entries
 
 if TYPE_CHECKING:
@@ -44,26 +47,36 @@ def seed_storefront(db: Database) -> int:
     return count
 
 
-@dataclass
-class SeedReport:
-    """Outcome of one ``--seed-temu`` / ``--seed-aliexpress`` run (one search per provider asked)."""
-
-    category: str
-    keyword: str
-    received: int = 0
-    min_rating: float = 0.0
-    min_orders: int = 0
-    inserted: list[Product] = field(default_factory=list)
-    duplicates: list[Product] = field(default_factory=list)      # already in SQLite: left untouched
-    over_limit: list[Product] = field(default_factory=list)      # usable, but beyond --limit
-    rejected: list[tuple[str, str]] = field(default_factory=list)  # (item, reason)
-    notice: str | None = None
-    provider: str | None = None                                  # the provider that delivered; None = all failed
-    attempts: list[Any] = field(default_factory=list)            # ProviderAttempt per provider asked, in order
-    source: str = TEMU_SOURCE                                    # the source plugin that ran the chain
+SeedReport = HarvestReport      # the names used before the harvester existed
+TemuSeedReport = HarvestReport
 
 
-TemuSeedReport = SeedReport  # the original name
+def seed_source(
+    engine: "Engine", source_plugin: str, *, category: str, keyword: str | None = None, limit: int = 10,
+    job_id: str | None = None,
+) -> HarvestReport:
+    """Harvest one RapidAPI chain source into ``products`` with an ad-hoc keyword: no LLM call.
+
+    A thin alias of the Stage 1 harvester (``python main.py --harvest``). The category's stored
+    search rules are used — with ``keyword`` replacing their keyword when given; a category that
+    is not configured yet is harvested with its name as the keyword. Products already stored are
+    reported as duplicates; ``job_id`` (Temu only) collects an earlier background search.
+    """
+    if source_plugin not in SEED_SOURCES:
+        raise ValueError(f"cannot seed from '{source_plugin}' (choose one of: {', '.join(SEED_SOURCES)})")
+    try:
+        config = engine.registry.get_category(category_slug(category))
+    except PipelineError:
+        config = CategoryConfig(category_id=category, display_name_en=category)
+    standard = {
+        "min_rating": _standard(engine, "STOREFRONT_MIN_RATING", 4.5),
+        "min_orders": int(_standard(engine, "STOREFRONT_MIN_ORDERS", 200)),
+    }
+    config = config.model_copy(update=standard)
+    return engine.harvester.harvest_one(
+        config, source_plugin, limit=limit, keyword=keyword or (None if config.search_for(source_plugin) else category),
+        job_id=job_id,
+    )
 
 
 def _standard(engine: "Engine", name: str, default: float) -> float:
@@ -71,44 +84,6 @@ def _standard(engine: "Engine", name: str, default: float) -> float:
         return float(engine.settings.get_env(name) or default)
     except ValueError:
         return default
-
-
-def seed_source(
-    engine: "Engine", source_plugin: str, *, category: str, keyword: str | None = None, limit: int = 10,
-    job_id: str | None = None,
-) -> SeedReport:
-    """Load real products of one RapidAPI chain source into the storefront: no LLM call.
-
-    The source walks its provider chain and stops at the first provider that delivers usable
-    products. That batch is filtered against the storefront's listing standard, ranked by rating and
-    sales, and the best ``limit`` products that SQLite does not hold yet are inserted
-    under ``category``. Products already stored (same store id, or the same item from
-    another source) are reported as duplicates and left as they are. ``job_id`` (Temu only)
-    collects the results of a search that is already running or finished instead of starting one.
-    """
-    if source_plugin not in SEED_SOURCES:
-        raise ValueError(f"cannot seed from '{source_plugin}' (choose one of: {', '.join(SEED_SOURCES)})")
-    source: Any = engine.plugins.get("source", source_plugin)(PluginContext(settings=engine.settings))
-    min_rating = _standard(engine, "STOREFRONT_MIN_RATING", 4.5)
-    min_orders = int(_standard(engine, "STOREFRONT_MIN_ORDERS", 200))
-    extra = {"job_id": job_id} if job_id is not None else {}
-    batch = source.fetch_batch(category, min_rating, min_orders, keyword=keyword, max_items=limit, **extra)
-
-    report = SeedReport(
-        category=category, keyword=batch.keyword, received=batch.received, min_rating=min_rating,
-        min_orders=min_orders, rejected=list(batch.rejected), notice=batch.notice,
-        provider=batch.provider, attempts=list(batch.attempts), source=source_plugin,
-    )
-    known = source.stored_refs(batch.products)
-    for product in batch.products:
-        if product.ref in known:
-            report.duplicates.append(product)
-        elif len(report.inserted) >= limit:
-            report.over_limit.append(product)
-        else:
-            engine.db.upsert_product(product, {"category": category})
-            report.inserted.append(product)
-    return report
 
 
 def seed_temu(

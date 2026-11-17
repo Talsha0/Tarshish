@@ -1,0 +1,50 @@
+# Social accounts matrix — (category, language, platform) -> account.
+#
+# One row per publishing account: Hebrew and English pages of the same category are separate
+# rows, so `--publish --category gadgets --lang he` and `--lang en` reach different accounts.
+# The platform selects the publisher plugin by convention (instagram -> instagram_pub).
+#
+# token_env_var / account_id_env_var hold the NAMES of .env variables — never the secrets.
+# account_id_env_var feeds the publisher's account credential (Instagram business account id,
+# Telegram chat id). Seeds the `social_accounts` table (dashboard: Social Accounts).
+
+social_accounts:
+  # gadgets ------------------------------------------------------------------
+  - category_id: "gadgets"
+    language: "he"
+    platform: "instagram"
+    account_handle: "gadgets"
+    token_env_var: "INSTAGRAM_ACCESS_TOKEN"
+    account_id_env_var: "INSTAGRAM_BUSINESS_ACCOUNT_ID"
+    enabled: true
+
+  - category_id: "gadgets"
+    language: "en"
+    platform: "instagram"
+    account_handle: "gadgets_en"
+    token_env_var: "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN"
+    account_id_env_var: "INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN"
+    enabled: true
+
+  - category_id: "gadgets"
+    language: "he"
+    platform: "tiktok"
+    account_handle: "@gadgets.il"
+    token_env_var: "TIKTOK_ACCESS_TOKEN_GADGETS_HE"
+    enabled: false                     # no tiktok_pub publisher plugin is installed yet
+
+  - category_id: "gadgets"
+    language: "en"
+    platform: "tiktok"
+    account_handle: "@gadgets.en"
+    token_env_var: "TIKTOK_ACCESS_TOKEN_GADGETS_EN"
+    enabled: false
+
+  # sports -------------------------------------------------------------------
+  - category_id: "sports"
+    language: "he"
+    platform: "telegram"
+    account_handle: "@my_sports_channel"
+    token_env_var: "TG_SPORTS_BOT_TOKEN"
+    account_id_env_var: "TG_SPORTS_CHAT_ID"
+    enabled: true

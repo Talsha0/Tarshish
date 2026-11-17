@@ -1,12 +1,12 @@
 """Proof-of-concept product source: a small, realistic AliExpress-style catalogue.
 
 It behaves like a real source plugin (filters, ordering, limit, retry wrapper)
-without any network access, so the whole pipeline can be exercised offline.
+without any network access, so harvesting and publishing can be exercised offline.
 Swap it for a real implementation by adding e.g. ``plugins/sources/aliexpress.py``
-and pointing the pipeline's ``source`` at it.
+and harvesting with ``--source aliexpress``.
 
 The products live in ``_mock_catalogue.py`` (shared with ``temu_mock`` and the
-storefront seeder). A pipeline whose product type names a shelf — sports,
+storefront seeder). A category whose id names a shelf — sports,
 gadgets, home — gets that shelf; ``running_and_sports`` returns the three
 sports/running products.
 """
@@ -29,11 +29,11 @@ class AliExpressMockSource(BaseSource):
         return "aliexpress_mock"
 
     @with_retry(max_attempts=3, base_delay=2.0)
-    def fetch_products(self, niche: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
+    def fetch_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
         # A real source would call its API here; the retry decorator already guards the call.
-        shelf = product_fields(self.source_name, niche)
+        shelf = product_fields(self.source_name, category)
         products = [
-            Product(source=self.source_name, niche=niche, currency="ILS", **item)
+            Product(source=self.source_name, category=category, currency="ILS", **item)
             for item in shelf
             if item["rating"] >= min_rating and item["orders_count"] >= min_orders
         ]

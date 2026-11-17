@@ -66,7 +66,7 @@ class BudgetExceededError(TarshishError):
 # Secret redaction
 # --------------------------------------------------------------------------- #
 # Token-shaped values. Used both for log redaction and to reject raw secrets
-# that someone tries to put into pipelines.yaml / the pipelines table.
+# that someone tries to put into config/*.yaml or the configuration tables.
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}"),            # Anthropic API keys
     re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"),             # generic "sk-" provider keys

@@ -59,6 +59,7 @@ class _Call:
 
 class TelegramPublisher(BasePublisher):
     required_credentials = ("token", "chat_id")
+    account_credential = "chat_id"
     default_env_vars = {"token": "TELEGRAM_BOT_TOKEN", "chat_id": "TELEGRAM_CHAT_ID"}
     _transport: Any = None  # test hook: an httpx.MockTransport instead of the network
 

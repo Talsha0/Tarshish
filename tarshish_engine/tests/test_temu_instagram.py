@@ -1,4 +1,4 @@
-"""The Temu RapidAPI source, the --seed-temu command, the Instagram publisher and the gadgets pipeline.
+"""The Temu RapidAPI source, the --seed-temu command, the Instagram publisher and the gadgets category end to end.
 
 No network: both APIs are replaced by ``httpx.MockTransport`` handlers that record every request.
 """
@@ -119,7 +119,7 @@ def test_invalid_temu_settings_halt_before_any_request(engine, temu_api, monkeyp
 
     monkeypatch.delenv("TEMU_AFFILIATE_URL_TEMPLATE")
     monkeypatch.delenv("RAPIDAPI_TEMU_HOST")
-    with pytest.raises(ConfigError, match="search_config"):
+    with pytest.raises(ConfigError, match="temu_search rules"):
         temu(engine, options={"search_config": {"pricemax": 5}}).fetch_products("gadgets", 0, 0, 5)
 
     # A missing key is not a configuration error: the provider is skipped and the fetch comes back empty.
@@ -394,57 +394,70 @@ def test_dry_runs_can_be_previewed_through_the_instagram_publisher(make_settings
     from core import bootstrap
 
     engine = bootstrap(settings=make_settings(dry_run_publisher="instagram_pub"), console_logging=False)
+    engine.harvester.harvest("gadgets", "temu_mock")
     caplog.set_level(logging.INFO, logger="tarshish")
-    report = engine.orchestrator.run("sports_he", dry_run=True)
-    assert report.ok and report.count("preview") == 3
-    assert caplog.text.count("simulated (dry-run)") == 3 and "stand-in picture" in caplog.text  # mock photos
+    report = engine.orchestrator.run("gadgets", "he", ["instagram_post", "instagram_story"], dry_run=True)
+    assert report.ok and report.count("preview") == 6
+    assert caplog.text.count("simulated (dry-run)") == 6 and "stand-in picture" in caplog.text  # mock photos
+    assert caplog.text.count("Instagram Story simulated") == 3  # the story profile asks for the Story format
 
 
-# -- gadgets_he pipeline ---------------------------------------------------------------- #
-def test_gadgets_pipeline_is_seeded_from_yaml(engine, temu_api):
-    config = engine.registry.get_pipeline("gadgets_he")
-    record = config.to_record()
-    assert (record["type"], config.language, config.source, config.generator) == ("gadgets", "he", "temu_rapidapi", "llm_text_gen")
-    assert (config.llm_model, config.publishing_mode, config.enabled) == ("claude-sonnet-5-5", "queued", True)
-    assert (config.filters.min_rating, config.filters.min_orders) == (4.5, 500)
-    assert config.options["search_config"] == {
-        "keyword": "tech gadgets", "l1Category": "Electronics & Appliances", "priceMin": 1, "priceMax": 100,
-    }
-    assert [page.key for page in config.social_pages] == [("console_pub", "default"), ("instagram_pub", "gadgets")]
-    assert config.social_pages[1].env_refs() == {
-        "token": "INSTAGRAM_ACCESS_TOKEN", "account_id": "INSTAGRAM_BUSINESS_ACCOUNT_ID",
-    }
-
-    # Nothing stored yet: the dry-run previews mock stand-ins, clean and free.
-    preview = engine.orchestrator.run("gadgets_he", dry_run=True)
-    assert preview.ok and preview.count("preview") >= 1 and not temu_api.requests
-    assert engine.db.query("SELECT COUNT(*) AS n FROM products")[0]["n"] == 0  # and nothing was written
-
-
-def test_gadgets_pipeline_queues_fresh_products_first(engine, temu_api):
-    first = engine.orchestrator.run("gadgets_he", limit=2)
-    assert first.ok and [(i.external_id, i.status) for i in first.items] == [("602", "queued"), ("601", "queued")]
-    assert any("instagram_pub" in warning for warning in first.warnings)  # no credentials: skipped, not fatal
-    assert temu_api.requests[0].url.params["keyword"] == "tech gadgets"
-
-    second = engine.orchestrator.run("gadgets_he", limit=2)
-    assert [(i.external_id, i.status) for i in second.items] == [("603", "queued"), ("602", "skipped"), ("601", "skipped")]
-    assert len(temu_api.requests) == 2  # still one request per run
-
-    strict = temu(engine, pipeline_id="gadgets_he", options={"search_config": {"skip_published": True}})
-    assert strict.fetch_products("gadgets", 4.5, 500, 6) == []
-
-
-def test_gadgets_pipeline_publishes_to_instagram_when_credentials_exist(engine, temu_api, monkeypatch):
-    graph = GraphApi()
-    monkeypatch.setenv("INSTAGRAM_ACCESS_TOKEN", TOKEN)
-    monkeypatch.setenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", ACCOUNT)
+# -- gadgets: harvest once (Temu) ➔ publish per language (Instagram) ------------------------- #
+def instagram_env(monkeypatch, graph):
+    for suffix in ("", "_GADGETS_EN"):
+        monkeypatch.setenv(f"INSTAGRAM_ACCESS_TOKEN{suffix}", TOKEN)
+        monkeypatch.setenv(f"INSTAGRAM_BUSINESS_ACCOUNT_ID{suffix}", ACCOUNT)
     monkeypatch.setattr(InstagramPublisher, "_transport", httpx.MockTransport(graph))
 
-    report = engine.orchestrator.run("gadgets_he", mode="immediate", limit=1)
 
-    assert report.ok and report.count("published") == 1 and not report.warnings
-    rows = {row["platform"]: row for row in engine.db.list_publications(pipeline_id="gadgets_he")}
-    assert rows["instagram_pub"]["status"] == "PUBLISHED" and rows["instagram_pub"]["platform_post_id"] == "18000000000000001"
-    assert graph.calls[0][2]["image_url"] == "https://img.kwcdn.com/product/pad.jpg"
-    assert "/c/gadgets" in graph.calls[0][2]["caption"]
+def test_gadgets_configuration_is_seeded_from_yaml(engine, temu_api):
+    category = engine.registry.get_category("gadgets")
+    assert (category.min_rating, category.min_orders, category.enabled) == (4.5, 500, True)
+    assert category.temu_search == {
+        "keyword": "smart tech gadgets", "l2Category": "Electronics & Appliances", "priceMin": 1, "priceMax": 100,
+    }
+    he = engine.registry.get_social_account("gadgets", "he", "instagram")
+    assert (he.account_handle, he.token_env_var, he.account_id_env_var) == (
+        "gadgets", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID")
+
+    # Nothing harvested yet: publishing never asks a store — it reports what to harvest.
+    preview = engine.orchestrator.run("gadgets", "he", ["instagram_post"], dry_run=True)
+    assert preview.ok and preview.items == [] and not temu_api.requests
+    assert any("--harvest --category gadgets" in warning for warning in preview.warnings)
+
+
+def test_gadgets_is_harvested_once_and_each_language_publishes_fresh_products_first(engine, temu_api, monkeypatch):
+    instagram_env(monkeypatch, GraphApi())
+    [harvest] = engine.harvester.harvest("gadgets", "temu_rapidapi")
+    assert harvest.ok and ids(harvest.inserted) == ["602", "601", "603"]
+    assert len(temu_api.requests) == 1 and temu_api.requests[0].url.params["keyword"] == "smart tech gadgets"
+
+    first = engine.orchestrator.run("gadgets", "he", ["instagram_post"], limit=2)
+    assert first.ok and [(i.external_id, i.status) for i in first.items] == [("602", "queued"), ("601", "queued")]
+    second = engine.orchestrator.run("gadgets", "he", ["instagram_post"], limit=2)
+    assert [(i.external_id, i.status) for i in second.items] == [("603", "queued")]
+    english = engine.orchestrator.run("gadgets", "en", ["instagram_post"], limit=5)
+    assert [i.external_id for i in english.items] == ["602", "601", "603"]  # its own account: all still fresh
+
+    assert len(temu_api.requests) == 1  # Stage 2 never fetches: one search served both languages
+    queued = engine.db.list_publications(statuses=["QUEUED"])
+    assert sorted({(row["language"], row["target_page"]) for row in queued}) == [("en", "gadgets_en"), ("he", "gadgets")]
+
+
+def test_gadgets_posts_and_stories_go_out_with_their_own_models(engine, temu_api, monkeypatch):
+    graph = GraphApi()
+    instagram_env(monkeypatch, graph)
+    engine.harvester.harvest("gadgets", "temu_rapidapi")
+
+    report = engine.orchestrator.run("gadgets", "he", ["instagram_post", "instagram_story"], mode="immediate", limit=1)
+
+    assert report.ok and report.count("published") == 2 and not report.warnings
+    assert {(r.content_type, r.generator, r.llm_model) for r in report.routes} == {
+        ("instagram_post", "llm_text_gen", "claude-sonnet-5-5"), ("instagram_story", "llm_story_gen", "claude-haiku-5-5"),
+    }
+    rows = {row["content_format"]: row for row in engine.db.list_publications(pipeline_id="gadgets_he")}
+    assert {row["status"] for row in rows.values()} == {"PUBLISHED"}
+    post, story = (call[2] for call in graph.calls if call[0] == "POST" and call[1].endswith("/media"))
+    assert post["image_url"] == "https://img.kwcdn.com/product/pad.jpg" and "/c/gadgets" in post["caption"]
+    assert story["media_type"] == "STORIES" and "caption" not in story  # Stories take no caption
+    assert len(rows["instagram_story"]["caption"]) <= 90  # the overlay hook, not a feed caption

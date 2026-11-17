@@ -10,12 +10,14 @@ AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 from core.database import Database  # noqa: E402
 
 APP = Path(__file__).resolve().parents[1] / "dashboard" / "app.py"
-SAVE = "FormSubmitter:pipeline_form_new-Save pipeline"
+SAVE_CATEGORY = "FormSubmitter:category_form_new-Save category"
+RUN = "FormSubmitter:run_form-▶ Run pipeline"
+TOKEN = "7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1"
 
 
 @pytest.fixture
 def dashboard(tmp_path, monkeypatch):
-    """A dashboard bound to its own empty database (seeded from pipelines.yaml on first run)."""
+    """A dashboard bound to its own empty database (seeded from config/*.yaml on first run)."""
     import streamlit as st
 
     st.cache_resource.clear()  # the app caches its engine per process; each test needs a fresh one
@@ -30,87 +32,139 @@ def dashboard(tmp_path, monkeypatch):
     st.cache_resource.clear()
 
 
-def test_dashboard_renders_every_tab_and_runs_a_dry_run(dashboard):
+def queue_console_posts(db, capsys):
+    """Through the CLI, on the dashboard's database: harvest sports, queue 3 posts to a console account."""
+    import main
+
+    db.upsert_config("content_profiles", {"content_type": "console_post", "platform": "console",
+                                          "generator": "llm_text_gen", "llm_model": "mock", "enabled": 1})
+    db.upsert_config("social_accounts", {"category_id": "sports", "language": "he", "platform": "console",
+                                         "account_handle": "default", "enabled": 1})
+    assert main.main(["--harvest", "--source", "aliexpress_mock", "--category", "sports"]) == 0
+    assert main.main(["--publish", "--category", "sports", "--lang", "he", "--content-types", "console_post",
+                      "--mode", "queued"]) == 0
+    capsys.readouterr()
+
+
+def test_dashboard_renders_every_tab_harvests_and_runs_a_dry_run(dashboard):
     app, db = dashboard
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs][:3] == ["Pipelines", "KPIs & Budget", "Queue & Logs"]
+    assert [tab.label for tab in app.tabs][:4] == [
+        "Categories & Search", "Social Accounts", "Content Types & AI Models", "Run Pipelines & KPIs"]
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)
     assert any("Monthly AI spend" in header.value for header in app.subheader)
-    assert any("Storefront click-throughs" in header.value for header in app.subheader)
     assert {metric.label: metric.value for metric in app.metric}["Storefront clicks"] == "0"
-    # Tab 1 flow card: [Input: source] ➔ [Generate: generator + model] ➔ [Output: publishers & pages]
-    cards = [block.value for block in app.markdown if 'class="tsh-flow"' in block.value]
-    card = next(value for value in cards if "aliexpress_mock" in value)
-    for expected in ("aliexpress_mock", "llm_text_gen", "model anthropic", "console_pub", "telegram_pub", "TG_SPORTS_BOT_TOKEN"):
-        assert expected in card
+    rules = next(block.value for block in app.markdown if "smart tech gadgets" in block.value)
+    assert "Electronics &amp; Appliances" in rules and "price 1–100" in rules
 
-    app.button(key="run_sports_he").click().run()
+    app.selectbox(key="harvest_source_gadgets").set_value("temu_mock").run()
+    app.button(key="harvest_gadgets").click().run()
+    assert not app.exception and any("inserted 3" in message.value for message in app.success)
+    assert db.query_one("SELECT COUNT(*) AS n FROM products WHERE category = 'gadgets'")["n"] == 3
+
+    app.button(key=RUN).click().run()  # defaults: gadgets · he · instagram_post + instagram_story · dry-run on
 
     assert not app.exception
-    assert any("Dry-run result" in expander.label for expander in app.expander)
-    assert any("לרכישה" in block.value or "הזמנות" in block.value for block in app.markdown)
+    assert any("Dry-run result" in expander.label and "gadgets_he" in expander.label for expander in app.expander)
+    routes = next(block.value for block in app.markdown if "llm_story_gen" in block.value and ">Account<" in block.value)
+    assert "claude-sonnet-5-5" in routes and "claude-haiku-5-5" in routes and "instagram_pub → gadgets" in routes
+    assert any("הקישור בביו" in block.value for block in app.markdown)  # the Hebrew story hook
     assert sum(db.get_status_counts().values()) == 0  # a dry-run writes nothing
 
 
-def test_pipeline_form_validates_then_creates_a_pipeline_that_is_live_immediately(dashboard):
+def test_category_form_validates_then_creates_a_category_that_can_be_harvested(dashboard):
     app, db = dashboard
 
-    app.text_input(key="f_id_new").set_value("Not A Valid ID!")
-    app.text_input(key="f_niche_new").set_value("smart_gadgets")
-    app.button(key=SAVE).click().run()
+    app.text_input(key="cf_id_new").set_value("!!")
+    app.text_input(key="cf_en_new").set_value("Yoga")
+    app.button(key=SAVE_CATEGORY).click().run()
     assert any("not valid" in error.value for error in app.error)
-    assert len(db.list_pipelines()) == 2  # nothing was saved (the two seeded pipelines only)
+    assert db.get_config("categories", "yoga") is None
 
-    app.text_input(key="f_id_new").set_value("gadgets_en")
-    app.text_input(key="f_niche_new").set_value("smart_gadgets")
-    app.button(key=SAVE).click().run()
-
-    assert not app.exception and not app.error
-    row = db.get_pipeline("gadgets_en")
-    assert row["type"] == "smart_gadgets" and row["source_plugin"] == "aliexpress_mock" and row["enabled"] == 1
-    assert json.loads(row["social_pages_json"]) == [{"platform": "console_pub", "page_name": "default"}]
-    # No restart: the new pipeline already has its card and its own dry-run button.
-    assert any(button.key == "run_gadgets_en" for button in app.button)
-    app.button(key="run_gadgets_en").click().run()
-    assert not app.exception and any("Dry-run result" in expander.label for expander in app.expander)
-
-
-def test_editing_a_pipeline_keeps_its_social_pages_and_env_var_names(dashboard):
-    app, db = dashboard
-    before = json.loads(db.get_pipeline("sports_he")["social_pages_json"])
-    assert len(before) == 2
-
-    app.button(key="edit_sports_he").click().run()
-    assert app.selectbox(key="form_pipeline").value == "sports_he"  # the form switched to that pipeline
-    app.radio(key="f_mode_sports_he").set_value("queued")
-    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
+    app.text_input(key="cf_id_new").set_value("Yoga Gear")
+    app.text_input(key="cf_he_new").set_value("יוגה")
+    app.text_input(key="cf_temu_kw_new").set_value("yoga mat")
+    app.number_input(key="cf_temu_max_new").set_value(60.0)
+    app.checkbox(key="cf_ali_on_new").uncheck()
+    app.button(key=SAVE_CATEGORY).click().run()
 
     assert not app.exception and not app.error
-    row = db.get_pipeline("sports_he")
-    assert row["publishing_mode"] == "queued"
-    assert json.loads(row["social_pages_json"]) == before  # incl. token_env_var / chat_id_env_var names
+    row = db.get_config("categories", "yoga-gear")
+    assert (row["display_name_en"], row["display_name_he"], row["aliexpress_search_json"]) == ("Yoga", "יוגה", None)
+    assert json.loads(row["temu_search_json"]) == {"keyword": "yoga mat", "priceMax": 60.0}
+    assert any(button.key == "harvest_yoga-gear" for button in app.button)  # live at once, no restart
 
 
-def test_enable_toggle_updates_the_database(dashboard):
+def test_editing_a_category_keeps_its_other_search_keys_and_the_toggle_saves(dashboard):
     app, db = dashboard
-    assert db.get_pipeline("sports_he")["enabled"] == 1
+    app.button(key="cat_edit_gadgets").click().run()
+    assert app.selectbox(key="form_category").value == "gadgets"
+    app.text_input(key="cf_temu_kw_gadgets").set_value("smart home gadgets")
+    app.button(key="FormSubmitter:category_form_gadgets-Save category").click().run()
 
-    app.toggle(key="enabled_sports_he").set_value(False).run()
+    assert not app.exception and not app.error
+    assert json.loads(db.get_config("categories", "gadgets")["temu_search_json"]) == {
+        "keyword": "smart home gadgets", "l2Category": "Electronics & Appliances", "priceMin": 1.0, "priceMax": 100.0,
+    }
 
-    assert not app.exception
-    assert db.get_pipeline("sports_he")["enabled"] == 0
+    app.toggle(key="cat_enabled_sports").set_value(False).run()
+    assert not app.exception and db.get_config("categories", "sports")["enabled"] == 0
+
+
+def test_accounts_matrix_shows_languages_side_by_side_and_refuses_raw_tokens(dashboard):
+    app, db = dashboard
+    matrix = next(block.value for block in app.markdown if "Hebrew (he)" in block.value and "gadgets_en" in block.value)
+    assert matrix.index("Hebrew (he)") < matrix.index("English (en)")
+    assert "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN" in matrix and "no tiktok_pub plugin" not in matrix  # tiktok: disabled
+    assert "⏸ @gadgets.il · disabled" in matrix and "⚠️ gadgets · environment variable" in matrix
+
+    app.selectbox(key="acc_category").set_value("sports").run()
+    app.selectbox(key="acc_language").set_value("en").run()
+    app.selectbox(key="acc_platform").set_value("telegram").run()
+    form = "FormSubmitter:account_form_sports_en_telegram-Save account"
+    app.text_input(key="af_handle_sports_en_telegram").set_value("@sports_en")
+    app.text_input(key="af_token_sports_en_telegram").set_value(TOKEN)  # a real-looking token
+    app.button(key=form).click().run()
+    assert any("NAME of an environment variable" in error.value for error in app.error)
+    assert db.get_config("social_accounts", "sports", "en", "telegram") is None  # nothing was stored
+
+    app.text_input(key="af_token_sports_en_telegram").set_value("TG_SPORTS_EN_TOKEN")
+    app.text_input(key="af_id_sports_en_telegram").set_value("TG_SPORTS_EN_CHAT")
+    app.button(key=form).click().run()
+    assert not app.exception and not app.error
+    row = db.get_config("social_accounts", "sports", "en", "telegram")
+    assert (row["account_handle"], row["token_env_var"], row["account_id_env_var"]) == (
+        "@sports_en", "TG_SPORTS_EN_TOKEN", "TG_SPORTS_EN_CHAT")
+    assert TOKEN not in json.dumps(db.list_config("social_accounts"))
+
+    app.button(key="unlink_sports_en_telegram").click().run()
+    assert not app.exception and db.get_config("social_accounts", "sports", "en", "telegram") is None
+
+
+def test_content_types_get_their_model_from_one_place(dashboard):
+    app, db = dashboard
+    app.selectbox(key="pf_model_instagram_story").set_value("gemini-3.5-flash-lite")
+    app.text_input(key="pf_tone_instagram_story").set_value("bold and short")
+    app.button(key="FormSubmitter:profile_form_instagram_story-Save content type").click().run()
+
+    assert not app.exception and not app.error
+    row = db.get_config("content_profiles", "instagram_story")
+    assert (row["llm_model"], row["tone"], row["generator"], row["publish_format"]) == (
+        "gemini-3.5-flash-lite", "bold and short", "llm_story_gen", "story")
+
+    app.text_input(key="pf_type_new").set_value("youtube_short")
+    app.text_input(key="pf_platform_new").set_value("Not a platform!")
+    app.button(key="FormSubmitter:profile_form_new-Add content type").click().run()
+    assert any("not valid" in error.value for error in app.error) and not db.get_config("content_profiles", "youtube_short")
 
 
 def test_queue_tab_retries_failed_items_and_flushes_the_queue(dashboard, capsys):
-    import main
-
     app, db = dashboard
-    assert main.main(["--pipeline", "sports_he", "--mode", "queued"]) == 0  # same database, via the CLI
+    queue_console_posts(db, capsys)  # same database, via the CLI
     queued = db.list_publications(statuses=["QUEUED"])
     assert len(queued) == 3
     db.mark_failed(queued[0]["id"], "Telegram sendMessage failed (403): bot is not a member of the channel")
-    capsys.readouterr()
 
     app.run()
     assert any(tab.label == "Failed (1)" for tab in app.tabs) and any(tab.label == "Queued (2)" for tab in app.tabs)
@@ -125,14 +179,13 @@ def test_queue_tab_retries_failed_items_and_flushes_the_queue(dashboard, capsys)
 
 
 def test_worker_pass_button_and_manual_metrics_entry(dashboard, monkeypatch, capsys):
-    import main
     import streamlit as st
 
     app, db = dashboard
     monkeypatch.setenv("WORKER_MIN_DELAY_SECONDS", "0")  # no pacing: everything queued is due at once
     monkeypatch.setenv("WORKER_MAX_DELAY_SECONDS", "0")
     st.cache_resource.clear()
-    assert main.main(["--pipeline", "sports_he", "--mode", "queued"]) == 0
+    queue_console_posts(db, capsys)
     app.run()
 
     next(button for button in app.button if button.label == "Run a worker pass now").click().run()
@@ -147,55 +200,8 @@ def test_worker_pass_button_and_manual_metrics_entry(dashboard, monkeypatch, cap
     assert not app.exception
     tiles = {metric.label: metric.value for metric in app.metric}
     assert tiles["Total views"] == "1,200" and tiles["Clicks"] == "90" and tiles["Revenue (USD)"] == "$12.50"
-
-
-def test_delete_is_allowed_only_for_pipelines_without_history(dashboard, capsys):
-    import main
-
-    app, db = dashboard
-    app.text_input(key="f_id_new").set_value("scratch_en")
-    app.text_input(key="f_niche_new").set_value("scratch")
-    app.button(key=SAVE).click().run()
-    assert db.get_pipeline("scratch_en") is not None
-
-    app.button(key="delete_scratch_en").click().run()
-    assert not app.exception and db.get_pipeline("scratch_en") is None
-
-    assert main.main(["--pipeline", "sports_he", "--mode", "immediate", "--limit", "1"]) == 0
-    capsys.readouterr()
-    app.button(key="edit_sports_he").click().run()
-    app.button(key="delete_sports_he").click().run()
-    assert any("publication history" in error.value for error in app.error)
-    assert db.get_pipeline("sports_he") is not None
-
-
-def test_social_pages_are_added_through_plain_widgets_and_raw_tokens_are_refused(dashboard):
-    app, db = dashboard
-    app.button(key="edit_sports_he").click().run()
-    app.number_input(key="f_rows_sports_he").set_value(3).run()  # one more row than the two existing pages
-
-    app.selectbox(key="f_pp_sports_he_2").set_value("telegram_pub")
-    app.text_input(key="f_pn_sports_he_2").set_value("@second_channel")
-    app.text_input(key="f_pt_sports_he_2").set_value("7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1")  # a real-looking token
-    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
-    assert any("NAME of an environment variable" in error.value for error in app.error)
-    assert len(json.loads(db.get_pipeline("sports_he")["social_pages_json"])) == 2  # nothing was stored
-
-    app.text_input(key="f_pt_sports_he_2").set_value("TG_SECOND_BOT_TOKEN")
-    app.text_input(key="f_pc_sports_he_2").set_value("TG_SECOND_CHAT_ID")
-    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
-
-    assert not app.exception and not app.error
-    pages = json.loads(db.get_pipeline("sports_he")["social_pages_json"])
-    assert pages[2] == {
-        "platform": "telegram_pub", "page_name": "@second_channel",
-        "token_env_var": "TG_SECOND_BOT_TOKEN", "chat_id_env_var": "TG_SECOND_CHAT_ID",
-    }
-
-    # Setting a row's platform to "— none —" removes that page.
-    app.selectbox(key="f_pp_sports_he_2").set_value("— none —")
-    app.button(key="FormSubmitter:pipeline_form_sports_he-Save pipeline").click().run()
-    assert not app.exception and len(json.loads(db.get_pipeline("sports_he")["social_pages_json"])) == 2
+    by_type = next(block.value for block in app.markdown if "console_post" in block.value and ">Net profit<" in block.value)
+    assert '<td class="num">3</td>' in by_type  # the KPI breakdown per content type: 3 published
 
 
 def test_dashboard_does_not_need_pyarrow(dashboard, monkeypatch):
@@ -215,7 +221,7 @@ def test_dashboard_does_not_need_pyarrow(dashboard, monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", refuse_pyarrow)
     app.run()
-    app.button(key="run_sports_he").click().run()
+    app.button(key=RUN).click().run()
 
     assert not app.exception
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)

@@ -1,6 +1,6 @@
 """Multi-provider LLM caption generator: Anthropic / Gemini / offline templates.
 
-The pipeline's ``llm_model`` selects the provider:
+The content profile's ``llm_model`` selects the provider:
 
 * ``claude-…``  or the alias ``anthropic`` -> Anthropic Messages API
 * ``gemini-…``  or the alias ``gemini``    -> Google Gemini API
@@ -178,9 +178,10 @@ Product
 - Title: {title}
 - Price: {price}{was_price}
 - Rating: {rating}/5 from buyers, {orders_count}+ orders
-- Category: {niche}
+- Category: {category}
 
 Guidelines
+- Tone: {tone}
 - 2-4 short lines, at most 500 characters, in natural everyday {language_name}. Translate or paraphrase the title rather than copying keyword-stuffed marketplace wording.
 - Lead with a hook, state the price{discount_hint}, and close with a call to action.
 - Use 1-3 fitting emojis. No URLs, hashtags or markdown inside the caption: the link is appended automatically."""
@@ -208,10 +209,14 @@ class _SafeFields(dict):
         return "{" + key + "}"
 
 
-def prompt_fields(product: Product, language: str) -> dict[str, Any]:
+DEFAULT_TONE = "warm, upbeat and trustworthy — like a friend sharing a genuinely good deal"
+
+
+def prompt_fields(product: Product, language: str, tone: str | None = None) -> dict[str, Any]:
     """Placeholders available to custom ``prompt_template`` strings."""
     discount = product.discount_percent
     return {
+        "tone": tone or DEFAULT_TONE,
         "language": language,
         "language_name": LANGUAGE_NAMES.get(language.split("-")[0], language),
         "title": product.title,
@@ -223,14 +228,17 @@ def prompt_fields(product: Product, language: str) -> dict[str, Any]:
         "discount_hint": f" and the {discount}% discount" if discount else "",
         "rating": product.rating,
         "orders_count": f"{product.orders_count:,}",
-        "niche": product.niche.replace("_", " "),
+        "category": product.category.replace("_", " ").replace("-", " "),
         "source": product.source,
     }
 
 
-def build_user_prompt(product: Product, language: str, prompt_template: str | None) -> str:
-    fields = prompt_fields(product, language)
-    template = prompt_template or DEFAULT_PROMPT_TEMPLATE
+def build_user_prompt(
+    product: Product, language: str, prompt_template: str | None, *, tone: str | None = None,
+    default_template: str = DEFAULT_PROMPT_TEMPLATE,
+) -> str:
+    fields = prompt_fields(product, language, tone)
+    template = prompt_template or default_template
     try:
         body = template.format_map(_SafeFields(fields))
     except (ValueError, IndexError, KeyError, AttributeError):
@@ -287,7 +295,7 @@ class OfflineTemplateWriter:
         "en": ("{percent}% off — only {price} (was {original})", "Only {price}"),
     }
     _GENERIC_TAGS = {"he": ["דילים", "מבצעים", "קניות_ברשת"], "en": ["deals", "bargain", "onlineshopping"]}
-    _NICHE_STOPWORDS = {"and", "the", "of", "for", "with"}
+    _CATEGORY_STOPWORDS = {"and", "the", "of", "for", "with"}
 
     def write(self, product: Product, language: str) -> tuple[str, list[str]]:
         lang = language.split("-")[0]
@@ -307,10 +315,11 @@ class OfflineTemplateWriter:
             rating=f"{product.rating:g}",
             orders=f"{product.orders_count:,}",
         )
-        niche_tags = [
-            word for word in re.split(r"[^0-9A-Za-z֐-׿]+", product.niche) if word and word.lower() not in self._NICHE_STOPWORDS
+        category_tags = [
+            word for word in re.split(r"[^0-9A-Za-z֐-׿]+", product.category)
+            if word and word.lower() not in self._CATEGORY_STOPWORDS
         ][:3]
-        return caption, niche_tags + self._GENERIC_TAGS[lang]
+        return caption, category_tags + self._GENERIC_TAGS[lang]
 
 
 # --------------------------------------------------------------------------- #
@@ -325,9 +334,14 @@ class _LLMReply:
 
 
 class LLMTextGenerator(BaseGenerator):
-    """Writes a short promotional caption + hashtags for a product."""
+    """Writes a short promotional caption + hashtags for a product.
+
+    Subclasses (``llm_story_gen``, ``ffmpeg_video_gen``) reuse the provider plumbing and
+    swap :attr:`default_prompt_template`, the offline writer and :meth:`finish`.
+    """
 
     content_type = "text"
+    default_prompt_template: str = DEFAULT_PROMPT_TEMPLATE
 
     def __init__(self, context: PluginContext) -> None:
         super().__init__(context)
@@ -377,14 +391,17 @@ class LLMTextGenerator(BaseGenerator):
             self._warn_once(f"SDK for provider '{self._provider}' is not installed ({exc}); using offline templates.")
             return self._offline(product, language)
 
-        user_prompt = build_user_prompt(product, language, prompt_template)
+        user_prompt = build_user_prompt(
+            product, language, prompt_template, tone=self.context.options.get("tone"),
+            default_template=self.default_prompt_template,
+        )
         if self._provider == "anthropic":
             reply = self._call_anthropic(client, user_prompt)
         else:
             reply = self._call_gemini(client, user_prompt)
 
         parsed = parse_caption_json(reply.text)
-        fallback_caption, fallback_tags = self._offline_writer.write(product, language)
+        fallback_caption, fallback_tags = self.offline_write(product, language)
         if parsed is not None:
             caption, hashtags = parsed
         elif reply.text.strip():
@@ -394,9 +411,9 @@ class LLMTextGenerator(BaseGenerator):
             # The call was billed but produced nothing usable: publish the template, keep the cost.
             logger.warning("%s returned no usable text; using the offline template for this product.", reply.model)
             caption, hashtags = fallback_caption, fallback_tags
-        return GeneratedContent(
+        return self.finish(GeneratedContent(
             product=product,
-            content_type="text",
+            content_type=self.content_type,
             language=language,
             caption=caption,
             hashtags=hashtags or fallback_tags,
@@ -406,7 +423,7 @@ class LLMTextGenerator(BaseGenerator):
             generation_cost_usd=estimate_cost_usd(
                 reply.model, reply.tokens_input, reply.tokens_output, self._price_overrides
             ),
-        )
+        ))
 
     # -- providers --------------------------------------------------------------- #
     def _client(self, api_key: str) -> Any:
@@ -521,12 +538,21 @@ class LLMTextGenerator(BaseGenerator):
         )
 
     # -- helpers ------------------------------------------------------------------- #
+    # -- extension points ---------------------------------------------------------- #
+    def offline_write(self, product: Product, language: str) -> tuple[str, list[str]]:
+        """The free, deterministic copy used for dry-runs, ``mock`` and missing API keys."""
+        return self._offline_writer.write(product, language)
+
+    def finish(self, content: GeneratedContent) -> GeneratedContent:
+        """Last step of every generation (live or offline): attach media, render jobs…"""
+        return content
+
     def _offline(self, product: Product, language: str, model_used: str = OFFLINE_MODEL) -> GeneratedContent:
-        caption, hashtags = self._offline_writer.write(product, language)
-        return GeneratedContent(
-            product=product, content_type="text", language=language,
+        caption, hashtags = self.offline_write(product, language)
+        return self.finish(GeneratedContent(
+            product=product, content_type=self.content_type, language=language,
             caption=caption, hashtags=hashtags, model_used=model_used,
-        )
+        ))
 
     def _api_key(self) -> str | None:
         settings = self.context.settings

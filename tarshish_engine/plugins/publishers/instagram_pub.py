@@ -22,14 +22,11 @@ video / reel    ``media_type=REELS`` + ``video_url``               yes (+ link-i
 story           ``media_type=STORIES`` + ``image_url``/``video_url``  **not accepted by Meta**
 ==============  =================================================  =======================
 
-A social page picks its format with the non-secret ``content_type`` option; without it
-the format follows the generated content (video ➔ Reel, anything else ➔ image post).
-To post the same product as a feed post *and* a Story, list two pages::
-
-    {"platform": "instagram_pub", "page_name": "gadgets",
-     "token_env_var": "INSTAGRAM_ACCESS_TOKEN", "account_id_env_var": "INSTAGRAM_BUSINESS_ACCOUNT_ID"}
-    {"platform": "instagram_pub", "page_name": "gadgets_story", "content_type": "story",
-     "token_env_var": "INSTAGRAM_ACCESS_TOKEN", "account_id_env_var": "INSTAGRAM_BUSINESS_ACCOUNT_ID"}
+A target picks its format with the non-secret ``content_type`` option, which the
+orchestrator fills from the content profile's ``publish_format`` (``instagram_post`` ➔
+image, ``instagram_story`` ➔ story); without it the format follows the generated content
+(video ➔ Reel, anything else ➔ image post). The same social account therefore receives
+feed posts and Stories, each written by the model its content profile routes to.
 
 Pages without explicit references fall back to ``INSTAGRAM_ACCESS_TOKEN`` /
 ``INSTAGRAM_BUSINESS_ACCOUNT_ID``. ``INSTAGRAM_GRAPH_API_VERSION`` (default ``v21.0``)
@@ -539,17 +536,20 @@ def verify_pages(registry: Any, pages: Iterable[Any], *, transport: Any = None) 
     return results
 
 
-def pages_to_verify(registry: Any, pipeline_id: str | None = None) -> list[Any]:
-    """The Instagram pages of one pipeline, of every pipeline, or the default ``.env`` account."""
+def pages_to_verify(registry: Any, category: str | None = None, language: str | None = None) -> list[Any]:
+    """The Instagram accounts of the social-accounts matrix (optionally one category / language).
+
+    One check per distinct pair of credential variables; with no Instagram account configured
+    at all, the default ``.env`` account is checked.
+    """
     from core.config import SocialPage
 
-    pipelines = [registry.get_pipeline(pipeline_id)] if pipeline_id else registry.list_pipelines()
+    accounts = registry.list_social_accounts(category=category, language=language, platform="instagram")
     pages: dict[tuple[str, str], Any] = {}
-    for pipeline in pipelines:
-        for page in pipeline.social_pages:
-            if page.platform == PLUGIN_NAME:
-                refs = {**InstagramPublisher.default_env_vars, **page.env_refs()}
-                pages.setdefault((refs["token"], refs["account_id"]), page)  # one check per account
-    if not pages and not pipeline_id:
+    for account in accounts:
+        page = registry.social_page(account)
+        refs = {**InstagramPublisher.default_env_vars, **page.env_refs()}
+        pages.setdefault((refs["token"], refs["account_id"]), page)  # one check per account
+    if not pages and category is None and language is None:
         return [SocialPage(platform=PLUGIN_NAME, page_name="default")]
     return list(pages.values())

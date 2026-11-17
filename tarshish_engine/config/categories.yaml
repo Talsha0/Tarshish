@@ -1,0 +1,53 @@
+# Categories & source search rules — Stage 1, language-agnostic product harvesting.
+#
+# One entry per category. Search rules are English keywords and filters per store and are
+# shared by every language: a category is harvested ONCE per source, never once per language.
+#     python main.py --harvest --category gadgets                    # every store with rules below
+#     python main.py --harvest --source temu_rapidapi                # one store, every category
+#     python main.py --harvest --source temu_mock --category gadgets # offline catalogue, no quota
+#
+# This file SEEDS the `categories` table on the first start; afterwards SQLite is the source of
+# truth (edit in the dashboard, Categories tab). Push later edits of this file with:
+#     python main.py --sync-config
+#
+# category_id is a URL slug (the storefront serves /c/<category_id>). min_rating / min_orders
+# are the quality bar a harvested product must meet to be stored and published.
+
+categories:
+  - category_id: "gadgets"
+    display_name_en: "Smart Gadgets"
+    display_name_he: "גאדג'טים חכמים"
+    temu_search:                       # plugins/sources/temu_rapidapi.py (and temu_mock)
+      keyword: "smart tech gadgets"
+      l2Category: "Electronics & Appliances"
+      priceMin: 1
+      priceMax: 100
+    aliexpress_search:                 # plugins/sources/aliexpress_rapidapi.py (and aliexpress_mock)
+      keyword: "smart gadgets"
+      priceMin: 1
+      priceMax: 100
+    min_rating: 4.5
+    min_orders: 500
+    enabled: true
+
+  - category_id: "sports"
+    display_name_en: "Running & Sports"
+    display_name_he: "ריצה וספורט"
+    aliexpress_search:
+      keyword: "running sports gear"
+      priceMin: 5
+      priceMax: 150
+    min_rating: 4.5
+    min_orders: 200
+    enabled: true
+
+  - category_id: "home"
+    display_name_en: "Home & Kitchen"
+    display_name_he: "בית ומטבח"
+    temu_search:
+      keyword: "home kitchen gadgets"
+      priceMin: 1
+      priceMax: 80
+    min_rating: 4.5
+    min_orders: 200
+    enabled: false                     # enable once its social accounts exist

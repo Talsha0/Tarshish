@@ -21,7 +21,7 @@ from core.models import Product
 # Storefront-only details: stored in the ``products`` table, never part of ``Product``.
 LISTING_FIELDS = ("category", "title_he", "coupon_code", "is_flash_sale", "stock_urgency_label")
 
-# A pipeline's product type selects a shelf when it names one of these words
+# A category id selects a shelf when it names one of these words
 # ("running_and_sports" -> sports, "smart_gadgets" -> gadgets).
 _CATEGORY_KEYWORDS: dict[str, frozenset[str]] = {
     "sports": frozenset({"sport", "sports", "running", "fitness", "training", "outdoor"}),
@@ -168,11 +168,11 @@ CATALOGUE: tuple[dict[str, Any], ...] = (
     ),
 )
 
-_PRODUCT_FIELDS = tuple(name for name in Product.model_fields if name not in ("source", "niche"))
+_PRODUCT_FIELDS = tuple(name for name in Product.model_fields if name not in ("source", "category"))
 
 
 def category_for(product_type: str) -> str | None:
-    """The shelf a pipeline's product type points at, or ``None`` when it names none of them."""
+    """The shelf a category id points at, or ``None`` when it names none of them."""
     words = set(re.split(r"[^a-z0-9]+", product_type.casefold()))
     for category, keywords in _CATEGORY_KEYWORDS.items():
         if words & keywords:
@@ -184,7 +184,7 @@ def product_fields(source_name: str, product_type: str) -> list[dict[str, Any]]:
     """``Product`` keyword arguments for one source's slice of the catalogue.
 
     A product type that names a shelf gets that shelf; any other type gets the
-    source's whole range, so a mock pipeline always has something to work with.
+    source's whole range, so a mock harvest always has something to work with.
     """
     shelf = [item for item in CATALOGUE if item["source"] == source_name]
     category = category_for(product_type)
@@ -197,7 +197,7 @@ def seed_entries() -> Iterator[tuple[Product, dict[str, Any]]]:
     """Every catalogue entry as ``(product, storefront listing)`` for the seeder."""
     for item in CATALOGUE:
         product = Product(
-            source=item["source"], niche=item["category"], currency="ILS",
+            source=item["source"], category=item["category"], currency="ILS",
             **{name: item[name] for name in _PRODUCT_FIELDS if name in item},
         )
         listing = {name: item[name] for name in LISTING_FIELDS if name in item}

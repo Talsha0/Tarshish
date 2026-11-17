@@ -24,10 +24,13 @@ from plugins.publishers import render_post_text, utf16_length
 TOKEN = "7123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1"
 
 
+def mock_source(engine):
+    return engine.plugins.get("source", "aliexpress_mock")(PluginContext(settings=engine.settings, dry_run=True))
+
+
 @pytest.fixture
 def product(engine):
-    wired = engine.registry.wire(engine.registry.get_pipeline("sports_he"), dry_run=True)
-    return wired.source.fetch_products("running_and_sports", 4.5, 200, 3)[0]
+    return mock_source(engine).fetch_products("sports", 4.5, 200, 3)[0]
 
 
 @pytest.fixture
@@ -38,11 +41,11 @@ def content(engine, product):
 
 # -- source ---------------------------------------------------------------------- #
 def test_mock_source_returns_three_products_and_applies_filters(engine):
-    source = engine.registry.wire(engine.registry.get_pipeline("sports_he"), dry_run=True).source
-    products = source.fetch_products("running_and_sports", 4.5, 200, 10)
-    assert len(products) == 3 and all(p.currency == "ILS" and p.canonical_hash for p in products)
-    assert len(source.fetch_products("running_and_sports", 4.75, 200, 10)) == 1
-    assert len(source.fetch_products("running_and_sports", 0, 0, 2)) == 2
+    source = mock_source(engine)
+    products = source.fetch_products("sports", 4.5, 200, 10)
+    assert len(products) == 3 and all(p.currency == "ILS" and p.canonical_hash and p.category == "sports" for p in products)
+    assert len(source.fetch_products("sports", 4.75, 200, 10)) == 1
+    assert len(source.fetch_products("sports", 0, 0, 2)) == 2
 
 
 # -- post formatting --------------------------------------------------------------- #

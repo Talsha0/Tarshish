@@ -1,10 +1,14 @@
 # Tarshish Engine
 
-Plugin-based engine for automated affiliate content pipelines:
-**fetch products ➔ generate content ➔ store ➔ publish or queue**.
+Plugin-based affiliate engine with a **two-stage, decoupled architecture**:
 
-Adding a pipeline for a new category, an AI model, a product source, a video renderer or a
-publishing destination never requires a change in `core/`.
+1. **Harvest** (language-agnostic) — fetch products per `(category, source)` into SQLite, once.
+2. **Publish** (per language) — for `(category, language, content types)`, turn harvested products into
+   localized posts, Stories and videos with the model routed to each content type, and publish or queue
+   them to the account mapped to `(category, language, platform)`.
+
+Adding a category, a language, an AI model, a product source, a video renderer or a publishing
+destination never requires a change in `core/`.
 
 The same database feeds **FindHub**, the public deal storefront: a FastAPI backend in `api/` and a
 Next.js site in `storefront/`. See [FindHub storefront](#findhub-storefront).
@@ -20,11 +24,12 @@ python -m venv --clear .venv
 python -m pip install -r requirements.txt
 copy .env.example .env            # optional: everything works offline without keys
 
-python main.py --pipeline sports_he --mode immediate --dry-run
+python main.py --harvest --source temu_mock --category gadgets          # Stage 1: offline catalogue, no quota
+python main.py --publish --category gadgets --lang he --dry-run         # Stage 2: preview the Hebrew posts + Stories
 ```
 
-With no API keys the engine uses the offline Hebrew/English template writer and
-the console publisher, so the command above works on a fresh checkout.
+With no API keys the engine uses the offline Hebrew/English template writer and prints the
+previews to the console, so the commands above work on a fresh checkout.
 
 A step-by-step checklist from first run to production is in
 [`../setup_roadmap.html`](../setup_roadmap.html) (open it in a browser).
@@ -36,9 +41,10 @@ SQLite file (`tarshish_engine.db`, WAL mode, so they can read and write at the s
 its own terminal, from this folder, with the virtual environment active:
 
 ```bash
-# 1. Python pipeline engine: fetch products, write and publish posts
+# 1. Python engine: harvest products (Stage 1), write and publish posts (Stage 2)
 python main.py --seed-storefront                                   # once: load the demo catalogue
-python main.py --pipeline sports_he --mode immediate --dry-run
+python main.py --harvest --source temu_mock --category gadgets
+python main.py --publish --category gadgets --lang he --dry-run
 
 # 2. FastAPI storefront backend: products, search, click tracking
 python -m uvicorn api.server:app --reload --port 8000              # same as: uvicorn api.server:app --reload --port 8000
@@ -55,25 +61,75 @@ Then open <http://localhost:3000> (it redirects to the Hebrew storefront, `/he`)
 > first three commands again (`--clear` wipes the old environment first).
 > `python main.py` prints an `[ENVIRONMENT ERROR]` with these steps when it detects this.
 
+## Architecture: two decoupled stages
+
+```
+                    config/categories.yaml ─┐   config/content_profiles.yaml ─┐   config/social_accounts.yaml ─┐
+                                            ▼                                 ▼                                ▼
+                                    categories table                content_profiles table           social_accounts table
+                              (search rules per store,          (content type ➔ generator,        ((category, language, platform)
+                               English, every language)           LLM model, tone, format)          ➔ handle + .env var NAMES)
+                                            │                                 │                                │
+  Stage 1 · --harvest                       ▼                                 │                                │
+  (category, source) ──► source plugin ──► products  (one row per item, no language)                          │
+                                            │                                 │                                │
+  Stage 2 · --publish                       ▼                                 ▼                                ▼
+  (category, language, content types) ──► unpublished products ──► generator [model] ──► publisher ──► account
+                                                                                   publications (category, language,
+                                                                                   content type, account, status)
+```
+
+* **Configuration is normalized into three concerns**, each a YAML seed file and a SQLite table edited in
+  the dashboard. Nothing is repeated per language: search rules live once per category, models once per
+  content type, and only the account matrix has a language axis.
+* **Stage 1 never knows about languages.** `--harvest` reads `categories`, hands the category's rules for a
+  store to that store's source plugin (`options["search_config"]`), re-applies the category's quality bar
+  and upserts into `products` keyed on `(source, external_id)`. The same item from a second store is
+  recognised by `canonical_hash` and kept once. No LLM call, no AI budget.
+* **Stage 2 never fetches.** `--publish` resolves, per content type, the profile (generator + model +
+  publish format) and the account for `(category, language, profile.platform)`, then selects harvested
+  products of the category that have **no publication yet for that language, account and content type**
+  (best sellers first). PUBLISHED, QUEUED/PENDING and FAILED rows all count as handled — failed ones are
+  recovered with `--retry-failed`, never silently re-generated; `--force` lifts the rule.
+* A **publishing pipeline** is a `(category, language)` pair with id `<category>_<language>`
+  (`gadgets_he`); it labels `publications.pipeline_id`, the AI ledger, `--stats` and the KPIs.
+
 ## CLI
+
+**Stage 1 — harvest** (language-agnostic, no LLM)
 
 | Command | What it does |
 |---|---|
-| `python main.py --pipeline sports_he --mode immediate --dry-run` | Simulate the pipeline and print the posts. No publishing, no paid LLM calls, no DB writes. |
-| `python main.py --pipeline sports_he --mode immediate` | Generate and publish now. |
-| `python main.py --pipeline sports_he --mode queued` | Generate and store as `QUEUED` with jittered slots. |
-| `python main.py --mode worker` | Publish the queue with human-like delays inside active hours (`--once` for a single pass). |
-| `python main.py --stats` | Queue size, published count, monthly AI spend. |
-| `python main.py --flush-queue` | Delete pending/queued items (AI spend stays on record). |
-| `python main.py --retry-failed` | Put failed items back in the queue. |
-| `python main.py --list-pipelines` / `--sync-config` | List pipelines / upsert `config/pipelines.yaml` into the database. |
-| `python main.py --seed-storefront` | Load the 14-product demo catalogue into the storefront (an upsert; safe to repeat). |
-| `python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10` | Load real Temu products into the storefront through the provider chain (one search per provider asked), no LLM calls. Prints each provider's outcome and inserted vs. skipped (duplicate) products; exits 1 when no provider delivers. Add `--job ID` to collect an earlier background search instead of starting one. |
-| `python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10` | The same for AliExpress through its RapidAPI failover chain (`config/aliexpress_providers.yaml`), no LLM calls; exits 1 when no provider delivers. |
+| `python main.py --harvest` | Every enabled category, from every store it has search rules for (`temu_rapidapi`, `aliexpress_rapidapi`). |
+| `python main.py --harvest --category gadgets` | One category. |
+| `python main.py --harvest --source temu_rapidapi` | One store, every enabled category. |
+| `python main.py --harvest --source temu_mock --category gadgets` | The offline catalogue (also `aliexpress_mock`): no API key, no quota. |
 
-Other flags: `--limit N`, `--force` (ignore de-duplication), `--log-level`.
-Omit `--pipeline` to run every enabled pipeline. Exit codes: `0` ok, `1` failures,
-`2` configuration error, `3` AI budget halt.
+**Stage 2 — publish** (per category × language × content type)
+
+| Command | What it does |
+|---|---|
+| `python main.py --publish --category gadgets --lang he --content-types instagram_post,instagram_story` | Generate with each content type's model and queue for the Hebrew account (`PUBLISHING_MODE`, default `queued`). |
+| `python main.py --publish --category gadgets --lang en --dry-run` | Simulate every enabled content type that has an English account: no posts, no paid LLM calls, no DB writes. |
+| `python main.py --publish --category gadgets --lang he --mode immediate` | Publish now instead of queueing. |
+| `python main.py --publish --category gadgets` | Every language that has an enabled account for the category (omit `--category` too for everything). |
+| `python main.py --mode worker` | Publish the queue with human-like delays inside active hours (`--once` for a single pass). |
+
+**Management**
+
+| Command | What it does |
+|---|---|
+| `python main.py --list-config` | Categories, content-type routing and the social-accounts matrix (with credential status). |
+| `python main.py --sync-config` | Upsert `config/categories.yaml`, `content_profiles.yaml` and `social_accounts.yaml` into the database (overwrites dashboard edits). |
+| `python main.py --stats [--category C --lang L]` | Queue size, published count, monthly AI spend, harvested products per category and source. |
+| `python main.py --flush-queue` / `--retry-failed` | Delete pending/queued items (AI spend stays on record) / put failed items back in the queue; `--category` + `--lang` narrow them to one pipeline. |
+| `python main.py --seed-storefront` | Load the 14-product demo catalogue into the storefront (an upsert; safe to repeat). |
+| `python main.py --seed-temu --category gadgets --keyword "smart watch" --limit 10` | An ad-hoc harvest from `temu_rapidapi` that overrides the category's keyword for one run (filters against the storefront standard). Add `--job ID` to collect an earlier background search. `--seed-aliexpress` does the same for AliExpress. Both exit 1 when no provider delivers. |
+| `python main.py --verify-instagram [--category C --lang L]` | Read-only check of the matrix's Instagram accounts. |
+
+Other flags: `--limit N` (harvest: products kept per category and source; publish: products per content
+type), `--force` (ignore de-duplication), `--log-level`. Exit codes: `0` ok, `1` failures,
+`2` configuration error (or no stage chosen), `3` AI budget halt.
 
 ## Dashboard
 
@@ -82,16 +138,25 @@ streamlit run dashboard/app.py
 python -m streamlit run dashboard/app.py     # same thing; prefer this form on Windows
 ```
 
-1. **Pipelines** — flow cards (`source ➔ generator + LLM model ➔ social pages`), create/edit form,
-   enable toggle, "Run Pipeline Now (Dry-Run)".
-2. **KPIs & Budget** — views, clicks, conversions, revenue, net profit, monthly AI spend vs.
-   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform and pipeline, and **storefront click-throughs**
-   per category and per source, counted live from `click_events` ("Refresh clicks" redraws them).
-3. **Queue & Logs** — queued / published / failed items, retry, flush, redacted log tail.
+1. **Categories & Search** — one card per category: display names (English / Hebrew), the Temu and
+   AliExpress search rules, the quality bar, how many products are harvested per store, an enable toggle and
+   **Harvest Now** for any source plugin. A form adds or edits categories (other keys of the stored rules,
+   such as `l1Category` or `sort`, are preserved). The Temu and AliExpress provider-chain cards live here.
+2. **Social Accounts** — the `category × language × platform` matrix, Hebrew and English columns side by side;
+   each cell shows the handle, its `.env` variable names and whether it can publish (✅ ready, ⚠️ variable
+   missing, ⏸ disabled, 🧩 no publisher plugin). A form links, edits or unlinks a cell. Raw tokens are refused.
+   **Test Instagram Connection** checks the Instagram accounts read-only.
+3. **Content Types & AI Models** — per content type: platform, generator, LLM model (any id can be typed),
+   publish format, tone and an optional custom prompt. One change applies to every category and language.
+4. **Run Pipelines & KPIs** — run a targeted pipeline (category, language, content types, dry-run on by
+   default, mode, products per type) and read its routing table and the generated captions; the harvested
+   inventory; then **KPIs & Budget** (views, clicks, revenue, net profit, monthly AI spend vs.
+   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform, content type and pipeline, storefront click-throughs)
+   and **Queue & Logs** (queued / published / failed, retry, flush, worker pass, redacted log tail).
 
-Deep links: `?tab=kpis`, `?tab=queue`. Restart the dashboard after editing `.env`.
-The dashboard has no login: keep it on `localhost` or behind a tunnel. It uses only Streamlit's basic
-widgets plus HTML for tables and bars, so it does not need `pyarrow` to load.
+Deep links: `?tab=categories`, `?tab=accounts`, `?tab=content`, `?tab=run`. Restart the dashboard after
+editing `.env`. The dashboard has no login: keep it on `localhost` or behind a tunnel. It uses only
+Streamlit's basic widgets plus HTML for tables and bars, so it does not need `pyarrow` to load.
 
 ## FindHub storefront
 
@@ -109,10 +174,10 @@ The language switch keeps the current page and its filters (`/he/c/sports` ⇄ `
 deal anywhere puts its `/p/{id}` address in the bar, so every open deal can be shared and Back closes it.
 
 **What is listed.** A product appears only when it has a category and meets the storefront standard:
-rating ≥ `STOREFRONT_MIN_RATING` (4.5) and orders ≥ `STOREFRONT_MIN_ORDERS` (200). A pipeline run files
-new products under its product type; the seeder and `Database.upsert_product(product, listing={...})`
+rating ≥ `STOREFRONT_MIN_RATING` (4.5) and orders ≥ `STOREFRONT_MIN_ORDERS` (200). A harvest files
+products under their category id; the seeder and `Database.upsert_product(product, listing={...})`
 set the listing details a source does not know (`category`, `title_he`, `coupon_code`, `is_flash_sale`,
-`stock_urgency_label`). A later pipeline run refreshes price, rating, orders and images and leaves those
+`stock_urgency_label`). A later harvest refreshes price, rating, orders and images and leaves those
 details alone.
 
 **Badges are computed, not typed in.** `Crowd Favorite` needs ≥ 1,000 orders and a rating ≥ 4.8.
@@ -166,22 +231,38 @@ texts are in `src/lib/i18n.ts`, and the design tokens (colours, type scale) in `
 
 * **`.env`** — secrets and settings, validated by Pydantic on startup (see `.env.example`).
   Set `TARSHISH_ENV_FILE` to load a different file, for example on a server.
-* **`config/pipelines.yaml`** — seeds the `pipelines` table on first start. After that SQLite is the
-  source of truth (edit in the dashboard); `--sync-config` pushes the file again. It ships two
-  pipelines: `sports_he` (offline mock source) and `gadgets_he` (real Temu products ➔ Instagram).
-  A pipeline names its product type with the `category:` key.
-* **Secrets never enter the database or YAML.** A social page stores the *names* of the env vars:
+* **`config/categories.yaml`** — categories and their language-agnostic search rules:
 
-  ```json
-  {"platform": "telegram_pub", "page_name": "@my_channel",
-   "token_env_var": "TG_SPORTS_BOT_TOKEN", "chat_id_env_var": "TG_SPORTS_CHAT_ID"}
+  ```yaml
+  - category_id: "gadgets"                 # URL slug; the storefront serves /c/gadgets
+    display_name_en: "Smart Gadgets"
+    display_name_he: "גאדג'טים חכמים"
+    temu_search: {keyword: "smart tech gadgets", l2Category: "Electronics & Appliances", priceMin: 1, priceMax: 100}
+    aliexpress_search: {keyword: "smart gadgets", priceMin: 1, priceMax: 100}
+    min_rating: 4.5
+    min_orders: 500
+    enabled: true
   ```
 
-  A missing variable logs a warning and skips only that target. Raw tokens in config are rejected.
+  `temu_rapidapi` and `temu_mock` read `temu_search`; the AliExpress sources read `aliexpress_search`. A
+  store added later as a plugin is searched with `display_name_en`, so it needs no schema change.
+* **`config/content_profiles.yaml`** — content type ➔ generator plugin, LLM model, platform, publish format
+  and tone. Shipped: `instagram_post` (`llm_text_gen`, `claude-sonnet-5-5`, feed image),
+  `instagram_story` (`llm_story_gen`, `claude-haiku-5-5`, Story), `tiktok_video` (`ffmpeg_video_gen`,
+  `claude-sonnet-5-5`) and `telegram_post` (`llm_text_gen`, `claude-haiku-5-5`).
+* **`config/social_accounts.yaml`** — the `(category_id, language, platform)` matrix: `account_handle`,
+  `token_env_var`, `account_id_env_var`, `enabled`. The platform picks the publisher plugin by convention
+  (`instagram` ➔ `instagram_pub`); `account_id_env_var` feeds that publisher's account credential
+  (Instagram business account id, Telegram chat id). The TikTok rows ship disabled: no `tiktok_pub`
+  publisher is installed yet.
+* The three files **seed** their tables on first start. After that SQLite is the source of truth (edit in
+  the dashboard); `python main.py --sync-config` pushes the files again.
+* **Secrets never enter the database or YAML.** Accounts store the *names* of the env vars; a missing
+  variable logs a warning and skips only that account. Raw tokens in config are rejected.
 
 ### LLM models
 
-`llm_model` (or `llm_provider`) accepts a model id or an alias:
+A content profile's `llm_model` accepts a model id or an alias:
 
 | Value | Meaning |
 |---|---|
@@ -217,7 +298,7 @@ A provider is skipped, with one structured warning in the log, when:
 | A background search that outlives `TEMU_JOB_TIMEOUT` | `job_pending` — collect it later with `--job <id>` |
 
 When every provider fails, the source logs a summary, returns nothing, and `--seed-temu` exits with
-code 1. The dashboard's Pipelines tab shows the chain, which keys are present and which provider
+code 1. The dashboard's Categories & Search tab shows the chain, which keys are present and which provider
 delivered last (**Temu RapidAPI Provider Chain**).
 
 **The chain is `config/temu_providers.yaml`**, read on every run (no `--sync-config`):
@@ -248,18 +329,16 @@ For more quota on one API, list it twice with two `api_key_env` names (two Rapid
 Every variable whose name contains `KEY` is masked as `[REDACTED]` in logs, and keys are sent to
 `*.rapidapi.com` hosts only (the chain file is rejected otherwise).
 
-Search terms are per pipeline, under `options.search_config`: `keyword` (default: the pipeline's
-category), `l1Category`, `l2Category`, `priceMin`, `priceMax`, `maxItems`. Each provider is sent the
-ones its API supports. Details worth knowing:
+Search terms are a category's `temu_search` rules: `keyword` (default: the category id), `l1Category`,
+`l2Category`, `priceMin`, `priceMax`, `maxItems`. Each provider is sent the ones its API supports.
+Details worth knowing:
 
-* **A `--dry-run` spends no quota.** It previews the Temu products already stored for the category
-  (`--seed-temu` puts them there). Without stored products it previews mock stand-ins, so a pipeline
-  can be checked before any search is spent.
-* **Products the pipeline already posted are ranked last**, behind fresh ones, and the orchestrator skips
-  them before any LLM call. `--force` and back-filling a newly added page therefore keep working. Set
-  `skip_published: true` in `search_config` to drop them at the source instead.
-* **`--seed-temu`** filters against the storefront standard (`STOREFRONT_MIN_RATING` / `_MIN_ORDERS`),
-  inserts the best `--limit` products that SQLite does not hold yet, and leaves stored ones untouched.
+* **`--harvest --dry-run` spends no quota.** It previews the Temu products already stored for the category,
+  or mock stand-ins, and writes nothing.
+* **Harvesting is the only place a store is asked.** Publishing in two languages costs one search, not two.
+* **Already-stored products** are reported as such; their price, rating and orders are refreshed in place.
+* **`--seed-temu`** is an ad-hoc harvest that can override the keyword and filters against the storefront
+  standard (`STOREFRONT_MIN_RATING` / `_MIN_ORDERS`) instead of the category's.
 * A product without a photo in the API payload gets a labelled stand-in picture. The storefront shows
   it; the Instagram publisher refuses to post it.
 
@@ -279,7 +358,7 @@ quick retries, an empty reply or a batch that fails the quality filter all move 
 | `ALIEXPRESS_AFFILIATE_URL_TEMPLATE` | Default `{url}?aff_fcid={tracking_id}&aff_platform=portals-tool`. A promotion link the API returns is kept as-is. |
 | `ALIEXPRESS_PROVIDERS_CONFIG_PATH` | The chain file; without it the same three providers are used. |
 
-A `--dry-run` spends no quota: it previews stored AliExpress products, else the `aliexpress_mock` catalogue.
+A `--harvest --dry-run` spends no quota: it previews stored AliExpress products, else the `aliexpress_mock` catalogue.
 The dashboard's **AliExpress RapidAPI Provider Chain** card shows the order, key status and the last run.
 
 ### Instagram publisher (`instagram_pub`)
@@ -289,26 +368,27 @@ Publishes through Meta's **Instagram API with Unified Login** (`https://graph.fa
 exponential backoff until `FINISHED`, then `media_publish` it. It needs a Professional (Business or Creator)
 account linked to a Meta Business Portfolio (no Facebook Page) and a Business Integration / System User token
 with `instagram_business_basic` and `instagram_business_content_publish`. Credentials come from `INSTAGRAM_ACCESS_TOKEN` and
-`INSTAGRAM_BUSINESS_ACCOUNT_ID`, or from the variables a social page names:
+`INSTAGRAM_BUSINESS_ACCOUNT_ID`, or from the variables a social account names:
 
-```json
-{"platform": "instagram_pub", "page_name": "@my_gadgets",
- "token_env_var": "IG_GADGETS_TOKEN", "account_id_env_var": "IG_GADGETS_ACCOUNT_ID"}
+```yaml
+- {category_id: "gadgets", language: "en", platform: "instagram", account_handle: "gadgets_en",
+   token_env_var: "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN", account_id_env_var: "INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN"}
 ```
 
 * Captions cannot carry a clickable link, so the post ends with `🔗 Link in bio -> /c/<category>`
   (Hebrew wording for Hebrew posts) instead of the affiliate URL. Put the storefront link in the bio.
 * Meta downloads the media itself: the image or video must be a public URL (not a local file).
-* Without credentials the page is skipped with a warning and the other targets still run. To preview
+* Without credentials the account is skipped with a warning and the other content types still run. To preview
   the exact Instagram caption and media URL in a dry-run, set `DRY_RUN_PUBLISHER=instagram_pub`.
 * `INSTAGRAM_GRAPH_API_VERSION` selects the Graph API version (default `v21.0`).
-* Formats: a page's `content_type` option picks `image`/`post` (feed photo), `video`/`reel` (Reel) or
-  `story` (`media_type=STORIES`, image or video). Without it, video content becomes a Reel and anything else
-  an image post. Stories take **no caption** (Meta rejects the field), so text must be baked into the media.
-  To post feed + Story, list two Instagram pages, e.g. `page_name: "gadgets_story", content_type: "story"`.
+* Formats come from the content profile's `publish_format`: `image` (feed photo), `reel`, or `story`
+  (`media_type=STORIES`, image or video). Without one, video content becomes a Reel and anything else an
+  image post. Stories take **no caption** (Meta rejects the field): `llm_story_gen` writes a ≤ 90-character
+  overlay hook and a 9:16 frame layout (`output/story_frames/`) for the text to be baked into the media.
+  The same account receives feed posts and Stories, each written by its own model.
 * Meta errors are decoded (`error.code` / `error_subcode`) into a next step: expired token (190/463),
   missing permission (10, 200–299), unreachable media URL (9004/2207052), daily publishing limit (2207042)…
-* `python main.py --verify-instagram [--pipeline ID]` (or **Test Instagram Connection** in the dashboard)
+* `python main.py --verify-instagram [--category C --lang L]` (or **Test Instagram Connection** in the dashboard)
   checks the token (`/debug_token`, falling back to `/me/permissions`), the account type and both
   permissions with read-only calls, and prints `Connected as @user | BUSINESS | Permissions: ✓ … ✓ …`.
 
@@ -318,38 +398,51 @@ with `instagram_business_basic` and `instagram_business_content_publish`. Creden
   `MAX_MONTHLY_AI_BUDGET_USD` (default `$5`) `BudgetExceededError` is raised and the run halts.
 * **Retries** — `@with_retry(max_attempts=3, base_delay=2.0)` wraps source, LLM and publisher calls.
 * **Redaction** — one global logger masks API keys, bot tokens and secrets as `[REDACTED]`.
-* **Fault isolation** — a failing product, target or pipeline never stops the others.
-* **De-duplication** — `canonical_hash` prevents re-posting the same item, also across sources.
+* **Fault isolation** — a failing product, content type, harvest pair or pipeline never stops the others.
+* **De-duplication** — `canonical_hash` keeps one product per item across stores at harvest time and
+  prevents re-posting it to the same account in the same format.
 
 ## Extending (no change to `core/`)
 
-| To add | Create | Reference as |
+| To add | Create | Use it |
 |---|---|---|
-| Product source | `plugins/sources/amazon.py` with a `BaseSource` subclass | `source: "amazon"` |
-| Generator / video renderer | `plugins/generators/my_gen.py` with a `BaseGenerator` subclass | `generator: "my_gen"` |
-| Publisher | `plugins/publishers/tiktok_pub.py` with a `BasePublisher` subclass | `publishers: ["tiktok_pub"]` |
+| Product source | `plugins/sources/amazon.py` with a `BaseSource` subclass | `--harvest --source amazon` |
+| Generator / video renderer | `plugins/generators/my_gen.py` with a `BaseGenerator` subclass | a content profile's `generator: "my_gen"` |
+| Publisher | `plugins/publishers/tiktok_pub.py` with a `BasePublisher` subclass | accounts with `platform: "tiktok"` |
+| Category, language, content type | a row in the dashboard or the YAML seed files | — |
 | Storage backend | `storage/s3_storage.py` with a `BaseStorage` subclass, `plugin_name = "s3"` | `STORAGE_MODE=s3` |
 
-Publishers declare `required_credentials` and `default_env_vars`; any `<name>_env_var` key on a
-social page is resolved from the environment and handed to the publisher.
+Publishers declare `required_credentials`, `default_env_vars` and `account_credential` (the credential an
+account's `account_id_env_var` feeds); generators read `content_type`, `tone` and `publish_format` from
+`context.options`. `llm_story_gen` and `ffmpeg_video_gen` subclass `llm_text_gen` and override only the
+default prompt, the offline writer and `finish()`.
 
 ## Database notes
 
-SQLite (`tarshish_engine.db`) in WAL mode. Tables: `pipelines`, `products`, `publications`,
-`metrics_snapshots`, plus two additions to the original spec:
+SQLite (`tarshish_engine.db`) in WAL mode, schema v3:
 
+* **Configuration** — `categories` (`category_id` PK, display names, `temu_search_json`,
+  `aliexpress_search_json`, `min_rating`, `min_orders`, `enabled`), `content_profiles` (`content_type` PK,
+  `platform`, `generator`, `llm_model`, `publish_format`, `tone`, `prompt_template`, `enabled`),
+  `social_accounts` (PK `(category_id, language, platform)`, `account_handle`, `token_env_var`,
+  `account_id_env_var`, `enabled`).
+* **`products`** — harvested once per `(source, external_id)`, filed under `category`; no language column.
+  Storefront columns: `title_he`, `original_price`, `discount_percent`, `rating`, `orders_count`,
+  `image_urls_json`, `coupon_code`, `is_flash_sale`, `stock_urgency_label`; plus `raw_url`, `video_url`.
+* **`publications`** — one row per product × account × content type: `pipeline_id` (`<category>_<language>`),
+  `category`, `language`, `content_format` (the content type), `account_platform`, publisher `platform`,
+  `target_page`, status, caption, model, cost share, schedule, and the replay snapshot (`content_json`,
+  `target_json`).
 * **`ai_usage`** — append-only ledger of LLM spend. The budget guardrail and `--stats` sum this
   table, so flushing the queue cannot erase money that was already spent.
-* Extra columns: `publications.created_at / target_page / target_json / content_json / attempts`
-  (queue replay and per-page de-duplication), `products.currency`, `pipelines.options_json`.
-* **Storefront columns on `products`** — `category`, `title_he`, `original_price`, `discount_percent`,
-  `rating`, `orders_count`, `image_urls_json`, `coupon_code`, `is_flash_sale`, `stock_urgency_label`.
-  They are added with `ALTER TABLE` on the first start after the upgrade (`Database._migrate`); existing
-  rows are kept and stay off the storefront until a pipeline run or the seeder upserts them again.
-* **`click_events`** — one row per confirmed outbound click on the storefront: `product_id`, `category`,
-  `source`, `language`, `referrer_path`, `clicked_at`.
+* **`metrics_snapshots`** (cumulative counters; KPIs use the latest per publication) and **`click_events`**
+  (one row per confirmed outbound storefront click).
 
-`metrics_snapshots` rows are cumulative counters; KPIs use the latest snapshot per publication.
+**Upgrading an existing database** happens on the first start, in place: `publications` is rebuilt without
+its foreign key to the old `pipelines` table (ids, metrics and history are kept, and rows gain the
+category/language of the pipeline they belonged to), and the old products column for categories is folded
+into `products.category`. The legacy `pipelines` table is left untouched and unused; drop it by hand once
+you no longer need it. Re-create the old pipelines as rows of the account matrix (Social Accounts tab).
 
 ## Tests
 
@@ -364,14 +457,15 @@ The suite needs no network, API keys or `.env`. Every test gets its own temporar
 | File | Covers |
 |---|---|
 | `test_spec_contract.py` | The specified contract: model fields, plugin interfaces, schema, CLI flags, declared dependencies |
-| `test_pipeline.py` | Dry-run, publishing, de-duplication, fault isolation, budget halt, queue, worker pacing, KPIs |
+| `test_harvester.py` | Stage 1: one harvest per category and source for every language, refresh in place, quality bar, planning, the CLI harvest ➔ publish flow in he/en, the v2 ➔ v3 database upgrade |
+| `test_orchestrator.py` | Stage 2: reads only harvested products, dry-run, per-account de-duplication, he/en accounts, fault isolation, budget halt, queue, worker pacing, paused accounts, KPIs |
 | `test_plugins.py` | Mock source, post formatting, Telegram (mocked transport), LLM request building and parsing |
 | `test_llm_sdk_integration.py` | The real Anthropic and Gemini SDK clients against a local stand-in server |
-| `test_config.py`, `test_resilience.py` | Startup validation, secret rejection, redaction, retries, budget guard |
-| `test_dashboard.py` | The Streamlit app end to end: every tab, dry-run, the pipeline form, enable toggle, queue actions, storefront clicks, and rendering without `pyarrow` |
+| `test_config.py`, `test_resilience.py` | The three seed files, validation, secret rejection, round trips, seed-once semantics, redaction, retries, budget guard |
+| `test_dashboard.py` | The Streamlit app end to end: four tabs, Harvest Now, the category / account / content-type forms, the run form, queue actions, storefront clicks, and rendering without `pyarrow` |
 | `test_storefront.py` | Schema migration, the seeder, search (typos, Hebrew), every API endpoint, click tracking, click metrics |
 | `test_instagram_publisher.py` | Instagram Unified Login: feed image, Reel backoff, Story image/video (no caption), Meta error hints, `--verify-instagram` and the dashboard button |
-| `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), the `gadgets_he` pipeline |
+| `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), gadgets harvested once and published per language, posts and Stories with their own models |
 | `test_temu_failover.py` | Temu provider chain: the 429 ➔ empty ➔ success failover, every failure mode, key fallback and exhausted-key memory, the four adapters, chain-file validation, key masking, the CLI summary |
 | `test_aliexpress_failover.py` | AliExpress provider chain: 429 ➔ empty ➔ success, 401/403, retries, missing keys and `RAPIDAPI_KEY` fallback, the four adapters, affiliate links, key masking, dry-run, `--seed-aliexpress` |
 

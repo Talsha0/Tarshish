@@ -6,13 +6,14 @@ Run from the project root:
 
 Tabs
 ----
-1. Pipelines   — visual wiring (source ➔ generator + model ➔ social pages), create / edit, enable, dry-run
-2. KPIs        — reach, revenue, net profit, the monthly AI budget guardrail and live
-                 storefront click-throughs per category and source
-3. Queue/Logs  — queued / published / failed publications, retry, flush, log tail
+1. Categories & Search   — categories, their Temu / AliExpress search rules, "Harvest Now" (Stage 1)
+2. Social Accounts       — the category × language × platform matrix: handles, .env variable names, on/off
+3. Content Types & AI    — generator + LLM model + tone per content type (instagram_post, instagram_story…)
+4. Run Pipelines & KPIs  — targeted publishing runs (Stage 2, dry-run by default), inventory, KPIs,
+                           budget, queue and logs
 
 The page talks to the same engine objects as the CLI (``core`` + ``MetricsService``),
-and pipelines are read from SQLite on every rerun, so edits apply immediately.
+and configuration is read from SQLite on every rerun, so edits apply immediately.
 
 Only Streamlit's basic widgets are used, with small HTML snippets for tables and bars.
 Streamlit's dataframe, data-editor and chart elements all load the native Apache Arrow
@@ -38,18 +39,29 @@ import streamlit as st  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from core import Engine, bootstrap  # noqa: E402
-from core.config import PipelineConfig, SocialPage, describe_validation_error  # noqa: E402
+from core.config import (  # noqa: E402
+    PUBLISH_FORMATS,
+    CategoryConfig,
+    ContentProfile,
+    SocialAccount,
+    describe_validation_error,
+)
+from core.models import category_slug  # noqa: E402
 from core.resilience import ConfigError, TarshishError, redact  # noqa: E402
 from dashboard.metrics_service import MetricsService  # noqa: E402
 
-TAB_PIPELINES, TAB_KPIS, TAB_QUEUE = "Pipelines", "KPIs & Budget", "Queue & Logs"
-_TAB_SLUGS = {"pipelines": TAB_PIPELINES, "kpis": TAB_KPIS, "queue": TAB_QUEUE}
-NEW_PIPELINE = "➕ Create a new pipeline"
-SELECT_NEXT = "_select_pipeline"  # pipeline to show in the form on the next draw (see render_pipeline_form)
-NO_PLATFORM = "— none —"          # a social-page row with this platform is ignored / removed on save
-LANGUAGES = ["he", "en", "ar", "ru", "es", "fr", "de"]
+TAB_CATEGORIES = "Categories & Search"
+TAB_ACCOUNTS = "Social Accounts"
+TAB_CONTENT = "Content Types & AI Models"
+TAB_RUN = "Run Pipelines & KPIs"
+TAB_KPIS, TAB_QUEUE = "KPIs & Budget", "Queue & Logs"   # inside Tab 4
+_TAB_SLUGS = {"categories": TAB_CATEGORIES, "accounts": TAB_ACCOUNTS, "content": TAB_CONTENT, "run": TAB_RUN,
+              "kpis": TAB_RUN, "queue": TAB_RUN}
+NEW_CATEGORY = "➕ Add a new category"
+SELECT_CATEGORY = "_select_category"  # category to show in the form on the next draw
+NO_FORMAT = "(publisher decides)"
+LANGUAGE_LABELS = {"he": "Hebrew (he)", "en": "English (en)", "ar": "Arabic (ar)", "ru": "Russian (ru)"}
 RTL_LANGUAGES = {"he", "ar", "fa", "ur"}
-_STANDARD_PAGE_KEYS = {"platform", "page_name", "token_env_var", "chat_id_env_var"}
 
 # One series hue for every bar (categories are nominal), plus reserved status colors.
 SERIES_BLUE = {"light": "#2a78d6", "dark": "#3987e5"}
@@ -196,88 +208,435 @@ def html_table(
 
 
 # --------------------------------------------------------------------------- #
-# Tab 1 — pipelines
+# Shared status helpers
 # --------------------------------------------------------------------------- #
-def flow_html(engine: Engine, pipeline: PipelineConfig) -> str:
-    """[Input: source] ➔ [Generate: generator + LLM model] ➔ [Output: publishers & social pages]."""
-    pages = []
-    for page in pipeline.social_pages:
-        _, reason = engine.registry.resolve_target(page)
-        if reason is None:
-            status = "✅ ready"
-        else:
-            status = f"⚠️ skipped — {esc(reason)}"
-        env_names = ", ".join(sorted(page.env_refs().values()))
-        env_note = f"<br><small>env: {esc(env_names)}</small>" if env_names else ""
-        pages.append(
-            f'<div class="tsh-page"><b>{esc(page.platform)}</b> → {esc(page.page_name)} · {status}{env_note}</div>'
+def account_status(engine: Engine, account: SocialAccount) -> tuple[str, str]:
+    """``(icon, text)`` describing whether an account can publish right now."""
+    if not account.enabled:
+        return "⏸", "disabled"
+    if not engine.plugins.has("publisher", account.publisher):
+        return "🧩", f"no {account.publisher} plugin installed"
+    _, reason = engine.registry.resolve_target(engine.registry.social_page(account))
+    if reason:
+        return "⚠️", reason
+    return "✅", "ready"
+
+
+def store_label(source: str) -> str:
+    return {"temu_rapidapi": "Temu (RapidAPI)", "aliexpress_rapidapi": "AliExpress (RapidAPI)",
+            "temu_mock": "Temu mock (offline)", "aliexpress_mock": "AliExpress mock (offline)"}.get(source, source)
+
+
+# --------------------------------------------------------------------------- #
+# Tab 1 — categories & source search mapping (Stage 1)
+# --------------------------------------------------------------------------- #
+def search_summary(search: dict[str, Any] | None) -> str:
+    if not search:
+        return "—"
+    parts = [f"“{search['keyword']}”"] if search.get("keyword") else []
+    for key in ("l1Category", "l2Category", "categoryId", "sort"):
+        if search.get(key):
+            parts.append(f"{key} {search[key]}")
+    low, high = search.get("priceMin"), search.get("priceMax")
+    if low is not None or high is not None:
+        parts.append(f"price {low if low is not None else '…'}–{high if high is not None else '…'}")
+    return " · ".join(parts)
+
+
+def run_harvest(engine: Engine, category: CategoryConfig, source: str) -> None:
+    with st.spinner(f"Harvesting {category.category_id} from {store_label(source)}…"):
+        report = engine.harvester.harvest_one(category, source)
+    st.session_state[f"harvest_result_{category.category_id}"] = report
+
+
+def render_harvest_result(category_id: str) -> None:
+    report = st.session_state.get(f"harvest_result_{category_id}")
+    if report is None:
+        return
+    summary = (f"{store_label(report.source)}: received {report.received} · inserted {len(report.inserted)} · "
+               f"already stored {len(report.duplicates)} · rejected {len(report.rejected)}")
+    if report.error:
+        st.error(f"{summary}\n\n{report.error}")
+    elif report.provider is None:
+        st.warning(f"{summary} — no provider delivered products (see the provider chain below).")
+    else:
+        st.success(summary)
+
+
+def render_category_card(engine: Engine, category: CategoryConfig, inventory: dict[tuple[str, str], int]) -> None:
+    cid = category.category_id
+    with st.container(border=True):
+        head = st.columns([4, 1.3, 1], vertical_alignment="center")
+        head[0].markdown(f"#### {esc(category.display_name_en)} · {esc(category.display_name_he or '—')}  "
+                         f"<small>`{esc(cid)}`</small>", unsafe_allow_html=True)
+        enabled = head[1].toggle("Enabled", value=category.enabled, key=f"cat_enabled_{cid}")
+        if enabled != category.enabled:
+            engine.registry.save_category(category.model_copy(update={"enabled": enabled}))
+            st.rerun()
+        if head[2].button("Edit", key=f"cat_edit_{cid}", width="stretch"):
+            st.session_state[SELECT_CATEGORY] = cid
+        stored = {source: count for (cat, source), count in inventory.items() if cat == cid}
+        html_table(
+            [
+                {"store": "Temu", "rules": search_summary(category.temu_search),
+                 "stored": sum(n for src, n in stored.items() if src.startswith("temu"))},
+                {"store": "AliExpress", "rules": search_summary(category.aliexpress_search),
+                 "stored": sum(n for src, n in stored.items() if src.startswith("aliexpress"))},
+            ],
+            {"store": "Store", "rules": "Search rules (English, shared by every language)", "stored": "Harvested"},
+            numeric=("stored",), clipped=("rules",),
         )
-    filters = pipeline.filters
-    return f"""
-    <div class="tsh-flow">
-      <div class="tsh-node">
-        <div class="tsh-kicker">Input · source plugin</div>
-        <div class="tsh-main">{esc(pipeline.source)}</div>
-        <div class="tsh-sub">niche {esc(pipeline.niche)}<br>rating ≥ {filters.min_rating:g} · orders ≥ {filters.min_orders:,}
-          · up to {pipeline.limit} per run</div>
-      </div>
-      <div class="tsh-arrow">➔</div>
-      <div class="tsh-node">
-        <div class="tsh-kicker">Generate · generator + LLM model</div>
-        <div class="tsh-main">{esc(pipeline.generator)}</div>
-        <div class="tsh-sub">model {esc(pipeline.llm_model)}<br>language {esc(pipeline.language)}
-          · {"custom prompt" if pipeline.prompt_template else "default prompt"}</div>
-      </div>
-      <div class="tsh-arrow">➔</div>
-      <div class="tsh-node">
-        <div class="tsh-kicker">Output · publishers &amp; social pages · {esc(pipeline.publishing_mode)}</div>
-        {''.join(pages)}
-      </div>
-    </div>
-    """
+        st.caption(f"Quality bar: rating ≥ {category.min_rating:g} · orders ≥ {category.min_orders:,}")
+        sources = [name for name in engine.plugins.names("source")]
+        defaults = category.default_sources()
+        row = st.columns([2.2, 1.2, 3], vertical_alignment="bottom")
+        choice = row[0].selectbox(
+            "Source", sources, index=sources.index(defaults[0]) if defaults and defaults[0] in sources else 0,
+            format_func=store_label, key=f"harvest_source_{cid}",
+            help="Live RapidAPI sources spend API quota; the mock sources serve an offline catalogue.",
+        )
+        if row[1].button("Harvest Now", key=f"harvest_{cid}", type="primary", width="stretch"):
+            run_harvest(engine, category, choice)
+        row[2].caption("Harvested once per store, stored in SQLite and shared by every language's pipeline.")
+        render_harvest_result(cid)
 
 
-def run_dry_run(engine: Engine, pipeline_id: str) -> None:
+def _price(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def store_inputs(
+    title: str, store: str, current: dict[str, Any] | None, category_key: str, suffix: str
+) -> tuple[bool, dict[str, Any]]:
+    """Plain widgets for one store's search rules; extra keys of the stored rules are preserved."""
+    current = dict(current or {})
+    st.markdown(f"**{title}**")
+    use = st.checkbox(f"Harvest from {title}", value=bool(current) or suffix == "new", key=f"cf_{store}_on_{suffix}")
+    cols = st.columns([2, 1.6, 1, 1])
+    keyword = cols[0].text_input("Keyword (English)", value=current.get("keyword", ""), key=f"cf_{store}_kw_{suffix}")
+    scope = cols[1].text_input(category_key, value=str(current.get(category_key, "") or ""), key=f"cf_{store}_cat_{suffix}")
+    low = cols[2].number_input("Min price", min_value=0.0, value=_price(current.get("priceMin")), key=f"cf_{store}_min_{suffix}")
+    high = cols[3].number_input("Max price", min_value=0.0, value=_price(current.get("priceMax")), key=f"cf_{store}_max_{suffix}")
+    for key, value in ((("keyword", keyword.strip())), (category_key, scope.strip()), ("priceMin", low), ("priceMax", high)):
+        if value in (None, ""):
+            current.pop(key, None)
+        else:
+            current[key] = value
+    return use, current
+
+
+def render_category_form(engine: Engine, categories: list[CategoryConfig]) -> None:
+    st.subheader("Add / edit a category")
+    by_id = {category.category_id: category for category in categories}
+    requested = st.session_state.pop(SELECT_CATEGORY, None)
+    if requested is not None:
+        st.session_state["form_category"] = requested
+    if st.session_state.get("form_category") not in (None, NEW_CATEGORY, *by_id):
+        st.session_state["form_category"] = NEW_CATEGORY
+    selected = st.selectbox("Category", [NEW_CATEGORY, *by_id], key="form_category")
+    current = by_id.get(selected)
+    suffix = current.category_id if current else "new"
+
+    with st.form(f"category_form_{suffix}", border=True):
+        cols = st.columns(3)
+        category_id = cols[0].text_input(
+            "Category ID", value=current.category_id if current else "", disabled=current is not None,
+            placeholder="e.g. sports", key=f"cf_id_{suffix}",
+            help="A URL slug (the storefront serves /c/<id>). Cannot be changed later.",
+        )
+        name_en = cols[1].text_input("Display name (English)", value=current.display_name_en if current else "",
+                                     key=f"cf_en_{suffix}")
+        name_he = cols[2].text_input("Display name (Hebrew)", value=current.display_name_he if current else "",
+                                     key=f"cf_he_{suffix}")
+        cols = st.columns(3)
+        min_rating = cols[0].number_input("Minimum rating", min_value=0.0, max_value=5.0, step=0.1, format="%.1f",
+                                          value=float(current.min_rating) if current else 4.5, key=f"cf_rating_{suffix}")
+        min_orders = cols[1].number_input("Minimum orders", min_value=0, step=50,
+                                          value=current.min_orders if current else 200, key=f"cf_orders_{suffix}")
+        enabled = cols[2].checkbox("Enabled", value=current.enabled if current else True, key=f"cf_enabled_{suffix}")
+        temu_on, temu = store_inputs("Temu", "temu", current.temu_search if current else None, "l2Category", suffix)
+        ali_on, ali = store_inputs("AliExpress", "ali", current.aliexpress_search if current else None, "categoryId", suffix)
+        submitted = st.form_submit_button("Save category", type="primary")
+
+    if submitted:
+        payload = {
+            "category_id": current.category_id if current else category_id,
+            "display_name_en": name_en, "display_name_he": name_he,
+            "min_rating": float(min_rating), "min_orders": int(min_orders), "enabled": enabled,
+            "temu_search": temu if temu_on else None, "aliexpress_search": ali if ali_on else None,
+        }
+        if current is None and engine.db.get_config("categories", category_slug(category_id or "")):
+            st.error(f"A category with id '{category_slug(category_id)}' already exists — select it above to edit it.")
+            return
+        try:
+            category = CategoryConfig.model_validate(payload)
+            engine.registry.save_category(category)
+        except ValidationError as exc:
+            st.error("The category is not valid:\n\n" + "\n".join(f"- {line}" for line in describe_validation_error(exc)))
+            return
+        except TarshishError as exc:
+            st.error(str(exc))
+            return
+        st.session_state[SELECT_CATEGORY] = category.category_id
+        flash(f"Category '{category.category_id}' saved — the next harvest uses it.")
+        st.rerun()
+
+
+def render_categories_tab(engine: Engine) -> None:
+    categories = engine.registry.list_categories()
+    inventory = {(row["category"], row["source"]): int(row["products"]) for row in engine.db.count_products()}
+    st.subheader("Categories & source search mapping")
+    st.caption("Stage 1 — language-agnostic harvesting: each category is fetched once per store and stored in "
+               "SQLite; every language's publishing pipeline reads the same products.")
+    if not categories:
+        st.info("No categories yet — add the first one below.")
+    for category in categories:
+        render_category_card(engine, category, inventory)
+    render_temu_provider_chain(engine)
+    render_aliexpress_provider_chain(engine)
+    st.divider()
+    render_category_form(engine, categories)
+
+
+# --------------------------------------------------------------------------- #
+# Tab 2 — social accounts matrix (category × language × platform)
+# --------------------------------------------------------------------------- #
+def platforms_of(engine: Engine) -> list[str]:
+    found = {profile.platform for profile in engine.registry.list_content_profiles()}
+    found |= {account.platform for account in engine.registry.list_social_accounts()}
+    return sorted(found)
+
+
+def render_matrix(engine: Engine, categories: list[CategoryConfig], languages: list[str], platforms: list[str]) -> None:
+    accounts = {account.key: account for account in engine.registry.list_social_accounts()}
+    for category in categories:
+        rows = []
+        for platform in platforms:
+            row: dict[str, Any] = {"platform": platform}
+            for language in languages:
+                account = accounts.get((category.category_id, language, platform))
+                if account is None:
+                    row[language] = "— not linked —"
+                    continue
+                icon, text = account_status(engine, account)
+                env = ", ".join(name for name in (account.token_env_var, account.account_id_env_var) if name)
+                row[language] = f"{icon} {account.account_handle} · {text}" + (f" · env {env}" if env else "")
+            rows.append(row)
+        st.markdown(f"**{esc(category.display_name_en)}** <small>`{esc(category.category_id)}`</small>",
+                    unsafe_allow_html=True)
+        html_table(rows, {"platform": "Platform", **{lang: LANGUAGE_LABELS.get(lang, lang) for lang in languages}},
+                   clipped=tuple(languages))
+
+
+def render_account_form(engine: Engine, categories: list[CategoryConfig], languages: list[str], platforms: list[str]) -> None:
+    st.subheader("Link / edit an account")
+    if not categories:
+        st.info("Add a category first (Categories & Search tab).")
+        return
+    cols = st.columns(3)
+    category = cols[0].selectbox("Category", [c.category_id for c in categories], key="acc_category")
+    language = cols[1].selectbox("Language", languages, accept_new_options=True, key="acc_language",
+                                 format_func=lambda code: LANGUAGE_LABELS.get(code, code))
+    platform = cols[2].selectbox("Platform", platforms or ["instagram"], accept_new_options=True, key="acc_platform",
+                                 help="The platform picks the publisher plugin: instagram ➔ instagram_pub.")
+    current = engine.registry.get_social_account(category, language, platform) if language and platform else None
+    suffix = f"{category}_{language}_{platform}"
+    st.caption(f"Editing **{category} × {language} × {platform}** — "
+               + ("existing account." if current else "not linked yet; saving creates it."))
+    with st.form(f"account_form_{suffix}", border=True):
+        cols = st.columns([1.4, 1.6, 1.6, 0.8], vertical_alignment="bottom")
+        handle = cols[0].text_input("Page / handle", value=current.account_handle if current else "",
+                                    placeholder="e.g. @gadgets.il", key=f"af_handle_{suffix}")
+        token = cols[1].text_input("Token env var", value=(current.token_env_var or "") if current else "",
+                                   placeholder="e.g. INSTAGRAM_ACCESS_TOKEN", key=f"af_token_{suffix}")
+        account_id = cols[2].text_input("Account / chat ID env var",
+                                        value=(current.account_id_env_var or "") if current else "",
+                                        placeholder="e.g. INSTAGRAM_BUSINESS_ACCOUNT_ID", key=f"af_id_{suffix}")
+        enabled = cols[3].checkbox("Enabled", value=current.enabled if current else True, key=f"af_enabled_{suffix}")
+        st.caption("The env-var fields hold the **names** of `.env` variables — never the token itself.")
+        submitted = st.form_submit_button("Save account", type="primary")
+    if submitted:
+        try:
+            account = SocialAccount.model_validate({
+                "category_id": category, "language": language, "platform": platform, "account_handle": handle,
+                "token_env_var": token, "account_id_env_var": account_id, "enabled": enabled,
+            })
+            engine.registry.save_social_account(account)
+        except ValidationError as exc:
+            st.error("The account is not valid:\n\n" + "\n".join(f"- {line}" for line in describe_validation_error(exc)))
+            return
+        except TarshishError as exc:
+            st.error(str(exc))
+            return
+        flash(f"Account {account.label} saved — the next publishing run uses it.")
+        st.rerun()
+    if current is not None:
+        with st.popover("Unlink this account"):
+            st.write(f"Remove **{current.label}** from the matrix? Its publication history is kept.")
+            if st.button("Yes, unlink", key=f"unlink_{suffix}", type="primary"):
+                engine.db.delete_config("social_accounts", *current.key)
+                flash(f"Account {current.label} unlinked.")
+                st.rerun()
+
+
+def render_accounts_tab(engine: Engine) -> None:
+    categories = engine.registry.list_categories()
+    languages = engine.registry.languages()
+    platforms = platforms_of(engine)
+    st.subheader("Social accounts matrix · category × language × platform")
+    st.caption("Each publishing pipeline (category + language) posts to the account in its cell. Hebrew and "
+               "English pages sit side by side; credentials are referenced by `.env` variable name only.")
+    render_matrix(engine, categories, languages, platforms)
+    if any(account.platform == "instagram" for account in engine.registry.list_social_accounts()):
+        render_instagram_connection(engine)
+    st.divider()
+    render_account_form(engine, categories, languages, platforms)
+
+
+# --------------------------------------------------------------------------- #
+# Tab 3 — content types & AI model assignment
+# --------------------------------------------------------------------------- #
+def model_options(engine: Engine, current: str | None = None) -> list[str]:
+    plugins = engine.plugins
+    models = list(dict.fromkeys(
+        m for name in plugins.names("generator") for m in plugins.get("generator", name).supported_models()
+    ))
+    if current and current not in models:
+        models.append(current)
+    return models
+
+
+def render_profile_form(engine: Engine, profile: ContentProfile | None) -> None:
+    suffix = profile.content_type if profile else "new"
+    generators = engine.plugins.names("generator")
+    models = model_options(engine, profile.llm_model if profile else None)
+    formats = [NO_FORMAT, *PUBLISH_FORMATS]
+
+    def index_of(options: list[str], value: str | None) -> int:
+        return options.index(value) if value in options else 0
+
+    with st.form(f"profile_form_{suffix}", border=True):
+        cols = st.columns([1.4, 1, 1.3, 1.6, 1])
+        content_type = cols[0].text_input(
+            "Content type", value=profile.content_type if profile else "", disabled=profile is not None,
+            placeholder="e.g. youtube_short", key=f"pf_type_{suffix}",
+        )
+        platform = cols[1].text_input("Platform", value=profile.platform if profile else "", placeholder="e.g. youtube",
+                                      key=f"pf_platform_{suffix}")
+        generator = cols[2].selectbox("Generator", generators,
+                                      index=index_of(generators, profile.generator if profile else "llm_text_gen"),
+                                      key=f"pf_generator_{suffix}")
+        llm_model = cols[3].selectbox(
+            "LLM model", models, index=index_of(models, profile.llm_model if profile else "claude-sonnet-5-5"),
+            accept_new_options=True, key=f"pf_model_{suffix}",
+            help="A model id, a provider alias (anthropic / gemini) or 'mock' for free offline templates. "
+                 "Type to enter any other model id.",
+        )
+        publish_format = cols[4].selectbox("Publish format", formats,
+                                           index=index_of(formats, profile.publish_format if profile else None),
+                                           key=f"pf_format_{suffix}")
+        cols = st.columns([3, 1])
+        tone = cols[0].text_input("Tone", value=(profile.tone or "") if profile else "",
+                                  placeholder="e.g. punchy and playful", key=f"pf_tone_{suffix}")
+        enabled = cols[1].checkbox("Enabled", value=profile.enabled if profile else True, key=f"pf_enabled_{suffix}")
+        prompt_template = st.text_area(
+            "Custom prompt template (optional)", value=(profile.prompt_template or "") if profile else "", height=90,
+            key=f"pf_prompt_{suffix}",
+            help="Leave empty for the generator's default. Placeholders: {title} {price} {was_price} "
+                 "{discount_percent} {rating} {orders_count} {category} {language_name} {tone}.",
+        )
+        submitted = st.form_submit_button("Save content type" if profile else "Add content type", type="primary")
+    if submitted:
+        try:
+            saved = ContentProfile.model_validate({
+                "content_type": profile.content_type if profile else content_type, "platform": platform,
+                "generator": generator, "llm_model": llm_model,
+                "publish_format": None if publish_format == NO_FORMAT else publish_format,
+                "tone": tone, "prompt_template": prompt_template, "enabled": enabled,
+            })
+            if profile is None and engine.db.get_config("content_profiles", saved.content_type):
+                st.error(f"Content type '{saved.content_type}' already exists — edit it above.")
+                return
+            engine.registry.save_content_profile(saved)
+        except ValidationError as exc:
+            st.error("The content type is not valid:\n\n"
+                     + "\n".join(f"- {line}" for line in describe_validation_error(exc)))
+            return
+        except TarshishError as exc:
+            st.error(str(exc))
+            return
+        flash(f"Content type '{saved.content_type}' now uses {saved.generator} with {saved.llm_model}.")
+        st.rerun()
+
+
+def render_content_tab(engine: Engine) -> None:
+    profiles = engine.registry.list_content_profiles()
+    st.subheader("Content types & AI model assignment")
+    st.caption("One routing for every category and language: change a model here and every pipeline that "
+               "publishes this content type uses it on its next run.")
+    html_table(
+        [{**p.model_dump(), "enabled": "yes" if p.enabled else "no", "publish_format": p.publish_format or "auto"}
+         for p in profiles],
+        {"content_type": "Content type", "platform": "Platform", "generator": "Generator", "llm_model": "LLM model",
+         "publish_format": "Format", "tone": "Tone", "enabled": "Enabled"},
+        clipped=("tone",),
+    )
+    for profile in profiles:
+        with st.expander(f"{profile.content_type} · {profile.generator} · {profile.llm_model}"):
+            render_profile_form(engine, profile)
+    with st.expander("➕ Add a content type"):
+        render_profile_form(engine, None)
+
+
+# --------------------------------------------------------------------------- #
+# Tab 4 — run pipelines & live KPIs
+# --------------------------------------------------------------------------- #
+def run_pipeline(engine: Engine, category: str, language: str, content_types: list[str], dry_run: bool,
+                 mode: str, limit: int) -> None:
     buffer = io.StringIO()
     try:
-        with st.spinner("Simulating the pipeline…"), contextlib.redirect_stdout(buffer):
-            report = engine.orchestrator.run(pipeline_id, dry_run=True, force=True)
-        st.session_state[f"dryrun_{pipeline_id}"] = {"report": report, "console": buffer.getvalue()}
-    except TarshishError as exc:
-        st.session_state[f"dryrun_{pipeline_id}"] = {"error": str(exc)}
+        with st.spinner("Running the publishing pipeline…"), contextlib.redirect_stdout(buffer):
+            report = engine.orchestrator.run(
+                category, language, content_types or None, mode=mode, limit=limit, dry_run=dry_run,
+            )
+        st.session_state["run_result"] = {"report": report, "console": buffer.getvalue()}
+    except TarshishError as exc:  # BudgetExceededError included
+        st.session_state["run_result"] = {"error": str(exc)}
 
 
-def render_dry_run_result(pipeline: PipelineConfig) -> None:
-    pipeline_id = pipeline.id
-    direction = "rtl" if pipeline.language.split("-")[0] in RTL_LANGUAGES else "ltr"
-    result = st.session_state.get(f"dryrun_{pipeline_id}")
+def render_run_result() -> None:
+    result = st.session_state.get("run_result")
     if not result:
         return
-    with st.expander("Dry-run result — nothing was published, no AI cost", expanded=True):
-        if "error" in result:
-            st.error(result["error"])
-            return
-        report = result["report"]
+    if "error" in result:
+        st.error(result["error"])
+        return
+    report = result["report"]
+    direction = "rtl" if report.language.split("-")[0] in RTL_LANGUAGES else "ltr"
+    label = "Dry-run result — nothing was published, no AI cost" if report.dry_run else "Run result"
+    with st.expander(f"{label} · {report.pipeline_id}", expanded=True):
         if report.error:
             st.error(report.error)
-        st.caption(
-            f"Fetched {report.fetched} product(s) · previewed {report.count('preview')} · "
-            f"failed {report.count('failed', 'partial')}"
+        html_table(
+            [{**vars(route), "account": f"{route.publisher} → {route.account}" if route.account else "—",
+              "status": "✅ ready" if route.ready else f"⚠️ {route.reason or 'not ready'}"} for route in report.routes],
+            {"content_type": "Content type", "generator": "Generator", "llm_model": "Model", "account": "Account",
+             "candidates": "Products", "status": "Status"},
+            numeric=("candidates",), clipped=("status",),
         )
+        st.caption(f"Published {report.count('published')} · queued {report.count('queued')} · previewed "
+                   f"{report.count('preview')} · failed {report.count('failed')} · AI cost {money(report.cost_usd, 4)}")
         for warning in report.warnings:
             st.warning(warning, icon="⚠️")
         for item in report.items:
             with st.container(border=True):
-                st.markdown(f"**{esc(item.title)}**")
+                st.markdown(f"**{esc(item.title)}** · `{esc(item.content_type)}`")
                 if item.status == "failed":
                     st.error(item.detail)
                     continue
-                targets = " · ".join(
-                    f"{'✅' if t.status == 'preview' else '⚠️'} {t.platform} → {t.page_name}" for t in item.targets
-                )
-                st.caption(f"Model: {item.model_used} · would go to: {targets}")
-                if item.detail:
-                    st.caption(f"ℹ️ {item.detail}")
+                written = "" if item.model_used == item.configured_model else f" (written by {item.model_used})"
+                st.caption(f"{item.target} · model {item.configured_model}{written} · {item.status}"
+                           + (f" — {item.detail}" if item.detail and item.status != "preview" else ""))
                 tags = " ".join(f"#{tag}" for tag in item.hashtags)
                 st.markdown(
                     f'<div class="tsh-caption" dir="{direction}">{esc(item.caption)}<br><br>{esc(tags)}</div>',
@@ -286,228 +645,54 @@ def render_dry_run_result(pipeline: PipelineConfig) -> None:
         if result.get("console"):
             with st.popover("Console output"):
                 st.code(result["console"], language=None)
-        if st.button("Clear result", key=f"clear_{pipeline_id}"):
-            st.session_state.pop(f"dryrun_{pipeline_id}", None)
+        if st.button("Clear result", key="clear_run"):
+            st.session_state.pop("run_result", None)
             st.rerun()
 
 
-def render_pipeline_card(engine: Engine, pipeline: PipelineConfig) -> None:
-    with st.container(border=True):
-        head = st.columns([5, 1.4, 2.6, 1], vertical_alignment="center")
-        head[0].markdown(f"#### {esc(pipeline.id)}")
-        enabled = head[1].toggle("Enabled", value=pipeline.enabled, key=f"enabled_{pipeline.id}")
-        if enabled != pipeline.enabled:
-            engine.registry.set_enabled(pipeline.id, enabled)
-            st.rerun()
-        if head[2].button("▶ Run Pipeline Now (Dry-Run)", key=f"run_{pipeline.id}", width="stretch"):
-            run_dry_run(engine, pipeline.id)
-        if head[3].button("Edit", key=f"edit_{pipeline.id}", width="stretch"):
-            st.session_state[SELECT_NEXT] = pipeline.id
-        st.markdown(flow_html(engine, pipeline), unsafe_allow_html=True)
-        render_dry_run_result(pipeline)
-
-
-def social_page_inputs(existing: list[SocialPage], publishers: list[str], row_count: int, suffix: str) -> list[dict[str, Any]]:
-    """One row of plain widgets per target page. Returns the raw values of every row."""
-    rows: list[dict[str, Any]] = []
-    for index in range(row_count):
-        page = existing[index] if index < len(existing) else None
-        options = [NO_PLATFORM, *publishers]
-        if page and page.platform not in options:
-            options.append(page.platform)  # a plugin that is no longer installed: keep it visible
-        visibility = "visible" if index == 0 else "collapsed"
-        cols = st.columns([1.25, 1.25, 1.5, 1.5])
-        rows.append({
-            "platform": cols[0].selectbox(
-                "Platform (publisher plugin)", options, index=options.index(page.platform) if page else 0,
-                key=f"f_pp_{suffix}_{index}", label_visibility=visibility,
-            ),
-            "page_name": cols[1].text_input(
-                "Page / channel", value=page.page_name if page else "", placeholder="e.g. @my_channel",
-                key=f"f_pn_{suffix}_{index}", label_visibility=visibility,
-            ),
-            "token_env_var": cols[2].text_input(
-                "Token env var", value=(page.token_env_var or "") if page else "", placeholder="e.g. TG_SPORTS_BOT_TOKEN",
-                key=f"f_pt_{suffix}_{index}", label_visibility=visibility,
-            ),
-            "chat_id_env_var": cols[3].text_input(
-                "Chat / page ID env var", value=(page.chat_id_env_var or "") if page else "",
-                placeholder="e.g. TG_SPORTS_CHAT_ID", key=f"f_pc_{suffix}_{index}", label_visibility=visibility,
-            ),
-        })
-    return rows
-
-
-def render_pipeline_form(engine: Engine, pipelines: list[PipelineConfig]) -> None:
-    st.subheader("Create / edit pipeline")
-    by_id = {pipeline.id: pipeline for pipeline in pipelines}
-    requested = st.session_state.pop(SELECT_NEXT, None)
-    if requested is not None:  # set by "Edit", after a save, or after a delete
-        st.session_state["form_pipeline"] = requested
-    if st.session_state.get("form_pipeline") not in (None, NEW_PIPELINE, *by_id):
-        st.session_state["form_pipeline"] = NEW_PIPELINE
-    selected = st.selectbox("Pipeline", [NEW_PIPELINE, *by_id], key="form_pipeline")
-    current = by_id.get(selected)
-    suffix = current.id if current else "new"
-
-    plugins = engine.plugins
-    sources, generators, publishers = plugins.names("source"), plugins.names("generator"), plugins.names("publisher")
-    models = list(dict.fromkeys(m for name in generators for m in plugins.get("generator", name).supported_models()))
-    if current and current.llm_model not in models:
-        models.append(current.llm_model)
-    languages = LANGUAGES + ([current.language] if current and current.language not in LANGUAGES else [])
-    existing_pages = list(current.social_pages) if current else [SocialPage(platform="console_pub")]
-
-    # Outside the form on purpose: changing it must redraw the form with more (or fewer) rows.
-    row_count = int(st.number_input(
-        "Number of target social pages", min_value=1, max_value=12, value=len(existing_pages), key=f"f_rows_{suffix}",
-        help="Raise it to add a page. To remove a page, set its platform to “— none —” and save.",
-    ))
-
-    def index_of(options: list[str], value: str | None) -> int:
-        return options.index(value) if value in options else 0
-
-    with st.form(f"pipeline_form_{suffix}", border=True):
-        left, right = st.columns(2)
-        pipeline_id = left.text_input(
-            "Pipeline ID", value=current.id if current else "", disabled=current is not None,
-            placeholder="e.g. gadgets_en", help="Lowercase letters, digits, '_' or '-'. Cannot be changed later.",
-            key=f"f_id_{suffix}",
-        )
-        niche = right.text_input(
-            "Type / niche", value=current.niche if current else "", placeholder="e.g. running_and_sports",
-            key=f"f_niche_{suffix}",
-        )
-        col_a, col_b, col_c = st.columns(3)
-        language = col_a.selectbox(
-            "Language", languages, index=index_of(languages, current.language if current else "he"),
-            accept_new_options=True, key=f"f_lang_{suffix}",
-        )
-        source = col_b.selectbox(
-            "Source plugin", sources, index=index_of(sources, current.source if current else None), key=f"f_src_{suffix}"
-        )
-        generator = col_c.selectbox(
-            "Generator plugin", generators, index=index_of(generators, current.generator if current else None),
-            key=f"f_gen_{suffix}",
-        )
-        col_d, col_e, col_f = st.columns(3)
-        llm_model = col_d.selectbox(
-            "LLM model", models, index=index_of(models, current.llm_model if current else "mock"),
-            accept_new_options=True, key=f"f_model_{suffix}",
-            help="A model id, a provider alias (anthropic / gemini) or 'mock' for free offline templates. "
-                 "Type to enter any other model id.",
-        )
-        mode = col_e.radio(
-            "Publishing mode", ["immediate", "queued"], horizontal=True,
-            index=index_of(["immediate", "queued"], current.publishing_mode if current else None),
-            key=f"f_mode_{suffix}",
-        )
-        limit = col_f.number_input(
-            "Products per run", min_value=1, max_value=100, value=current.limit if current else 5, key=f"f_limit_{suffix}"
-        )
-        col_g, col_h, col_i = st.columns(3)
-        min_rating = col_g.number_input(
-            "Minimum rating", min_value=0.0, max_value=5.0, step=0.1, format="%.1f",
-            value=float(current.filters.min_rating) if current else 4.5, key=f"f_rating_{suffix}",
-        )
-        min_orders = col_h.number_input(
-            "Minimum orders", min_value=0, step=50, value=current.filters.min_orders if current else 200,
-            key=f"f_orders_{suffix}",
-        )
-        enabled = col_i.checkbox("Enabled", value=current.enabled if current else True, key=f"f_enabled_{suffix}")
-
-        st.markdown("**Target social pages**")
-        st.caption(
-            "One row per page or channel. The last two fields hold the **names** of the `.env` variables that "
-            "contain the credentials — never the token itself. Leave them empty for publishers that need none "
-            "(console) or to use the publisher's default variables."
-        )
-        page_rows = social_page_inputs(existing_pages, publishers, row_count, suffix)
-
-        prompt_template = st.text_area(
-            "Custom prompt template (optional)", value=(current.prompt_template or "") if current else "",
-            height=110, key=f"f_prompt_{suffix}",
-            help="Leave empty for the generator's default. Placeholders: {title} {price} {was_price} "
-                 "{discount_percent} {rating} {orders_count} {niche} {language_name}.",
-        )
-        submitted = st.form_submit_button("Save pipeline", type="primary")
-
+def render_run_form(engine: Engine) -> None:
+    categories = [c.category_id for c in engine.registry.list_categories()]
+    profiles = [p.content_type for p in engine.registry.list_content_profiles()]
+    if not categories or not profiles:
+        st.info("Add a category and a content type first.")
+        return
+    languages = engine.registry.languages()
+    preferred = [name for name in ("instagram_post", "instagram_story") if name in profiles]
+    with st.form("run_form", border=True):
+        cols = st.columns([1.2, 1, 2.6])
+        category = cols[0].selectbox("Category", categories, key="run_category")
+        language = cols[1].selectbox("Language", languages, key="run_language",
+                                     format_func=lambda code: LANGUAGE_LABELS.get(code, code))
+        content_types = cols[2].multiselect("Content types", profiles, default=preferred, key="run_types",
+                                            help="Empty = every enabled type that has an account for this pair.")
+        cols = st.columns([1, 1.4, 1, 2])
+        dry_run = cols[0].toggle("Dry-run", value=True, key="run_dry",
+                                 help="On: preview only — no posts, no paid LLM calls, no database writes.")
+        mode = cols[1].radio("Mode", ["queued", "immediate"], horizontal=True, key="run_mode")
+        limit = cols[2].number_input("Products per type", min_value=1, max_value=50, value=3, key="run_limit")
+        cols[3].caption("With dry-run off the content is generated with the paid models and queued or "
+                        "published to the real accounts.")
+        submitted = st.form_submit_button("▶ Run pipeline", type="primary")
     if submitted:
-        save_pipeline(
-            engine, current,
-            {
-                "id": current.id if current else pipeline_id.strip(),
-                "enabled": enabled,
-                "niche": niche,
-                "language": language,
-                "source": source,
-                "generator": generator,
-                "llm_model": llm_model,
-                "publishing_mode": mode,
-                "limit": int(limit),
-                "filters": {"min_rating": float(min_rating), "min_orders": int(min_orders)},
-                "prompt_template": prompt_template.strip() or None,
-                "options": dict(current.options) if current else {},
-            },
-            page_rows,
-            existing_pages if current else [],
-        )
-
-    if current is not None:
-        with st.popover("Delete this pipeline"):
-            st.write(f"Delete **{current.id}**? Pipelines with publication history can only be disabled.")
-            if st.button("Yes, delete", key=f"delete_{current.id}", type="primary"):
-                try:
-                    engine.registry.delete_pipeline(current.id)
-                    st.session_state[SELECT_NEXT] = NEW_PIPELINE
-                    flash(f"Pipeline '{current.id}' deleted.")
-                    st.rerun()
-                except TarshishError as exc:
-                    st.error(str(exc))
+        run_pipeline(engine, category, language, content_types, dry_run, mode, int(limit))
+    render_run_result()
 
 
-def save_pipeline(
-    engine: Engine,
-    current: PipelineConfig | None,
-    payload: dict[str, Any],
-    page_rows: list[dict[str, Any]],
-    existing_pages: list[SocialPage],
-) -> None:
-    social_pages = []
-    for index, row in enumerate(page_rows):
-        platform = (row.get("platform") or "").strip()
-        if not platform or platform == NO_PLATFORM:
-            continue
-        page: dict[str, Any] = {}
-        # A row that still points at the same platform keeps that page's extra keys
-        # (publisher options such as parse_mode, or additional <name>_env_var references).
-        if index < len(existing_pages) and existing_pages[index].platform == platform:
-            stored = existing_pages[index].model_dump(exclude_none=True)
-            page.update({key: value for key, value in stored.items() if key not in _STANDARD_PAGE_KEYS})
-        page["platform"] = platform
-        page["page_name"] = (row.get("page_name") or "").strip() or "default"
-        for key in ("token_env_var", "chat_id_env_var"):
-            value = (row.get(key) or "").strip()
-            if value:
-                page[key] = value
-        social_pages.append(page)
-    payload["social_pages"] = social_pages
-
-    if current is None and engine.db.get_pipeline(payload["id"]) is not None:
-        st.error(f"A pipeline with id '{payload['id']}' already exists — select it above to edit it.")
-        return
-    try:
-        pipeline = PipelineConfig.model_validate(payload)
-        engine.registry.save_pipeline(pipeline)
-    except ValidationError as exc:
-        st.error("The pipeline is not valid:\n\n" + "\n".join(f"- {line}" for line in describe_validation_error(exc)))
-        return
-    except TarshishError as exc:
-        st.error(str(exc))
-        return
-    st.session_state[SELECT_NEXT] = pipeline.id
-    flash(f"Pipeline '{pipeline.id}' saved — it is live immediately.")
-    st.rerun()
+def render_run_tab(engine: Engine, metrics: MetricsService) -> None:
+    st.subheader("Run a publishing pipeline")
+    st.caption("Stage 2 — pick a category, a language and content types; the products come from the last "
+               "harvest, the models from Content Types, the accounts from the matrix.")
+    render_run_form(engine)
+    st.subheader("Harvested inventory")
+    html_table(metrics.get_product_inventory(),
+               {"category": "Category", "source": "Source", "products": "Products", "last_harvest": "Last harvest"},
+               formats={"last_harvest": lambda value: local_time(engine, value)}, numeric=("products",))
+    st.divider()
+    kpis, queue = st.tabs([TAB_KPIS, TAB_QUEUE])
+    with kpis:
+        render_kpis_tab(engine, metrics)
+    with queue:
+        render_queue_tab(engine)
 
 
 # Outcome of asking one provider of a RapidAPI chain (Temu, AliExpress), as the chain cards word it.
@@ -593,7 +778,7 @@ def render_aliexpress_provider_chain(engine: Engine, status: dict[str, Any] | No
 
 
 def render_instagram_connection(engine: Engine) -> None:
-    """A read-only check of every Instagram account the pipelines publish to (nothing is posted)."""
+    """A read-only check of every Instagram account of the matrix (nothing is posted)."""
     try:
         from plugins.publishers.instagram_pub import pages_to_verify, verify_pages
     except ImportError:  # the Instagram publisher was removed: nothing to show
@@ -613,29 +798,6 @@ def render_instagram_connection(engine: Engine) -> None:
             show = st.success if result["ok"] else st.error
             show(f"{result['page']}: {redact(result['summary'])}")
             st.code(redact("\n".join(result["lines"])), language=None)
-
-
-def render_pipelines_tab(engine: Engine) -> None:
-    pipelines = engine.registry.list_pipelines()
-    st.subheader("Pipeline architecture")
-    st.caption("Each card shows the exact wiring: input ➔ generate ➔ output. Changes apply without a restart.")
-    if not pipelines:
-        st.info("No pipelines yet — create the first one below.")
-    for pipeline in pipelines:
-        render_pipeline_card(engine, pipeline)
-    if any(pipeline.source == "temu_rapidapi" for pipeline in pipelines):
-        render_temu_provider_chain(engine)
-    # Shown next to the Temu card, when a pipeline uses it, or once it has fetched (--seed-aliexpress).
-    ali_status = aliexpress_chain_status(engine)
-    if ali_status is not None and (
-        ali_status["last_run"]
-        or any(pipeline.source in ("aliexpress_rapidapi", "temu_rapidapi") for pipeline in pipelines)
-    ):
-        render_aliexpress_provider_chain(engine, ali_status)
-    if any(page.platform == "instagram_pub" for pipeline in pipelines for page in pipeline.social_pages):
-        render_instagram_connection(engine)
-    st.divider()
-    render_pipeline_form(engine, pipelines)
 
 
 # --------------------------------------------------------------------------- #
@@ -821,7 +983,11 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
         "AI spend per platform is the generation cost attributed to its publications.",
     )
     breakdown(
-        "By pipeline", metrics.get_metrics_by_pipeline(), "pipeline_id", "Pipeline",
+        "By content type", metrics.get_metrics_by_content_type(), "content_format", "Content type",
+        "AI spend per content type is the generation cost attributed to its publications.",
+    )
+    breakdown(
+        "By pipeline (category × language)", metrics.get_metrics_by_pipeline(), "pipeline_id", "Pipeline",
         "AI spend per pipeline comes from the AI usage ledger (includes content that was later flushed).",
     )
     render_storefront_clicks(engine, metrics)
@@ -888,20 +1054,20 @@ def render_queue_tab(engine: Engine) -> None:
     )
     with tab_queued:
         publications_table(engine, queued, {
-            "id": "ID", "pipeline_id": "Pipeline", "platform": "Platform", "target_page": "Page",
-            "product_title": "Product", "status": "Status", "scheduled_for": "Scheduled for",
+            "id": "ID", "pipeline_id": "Pipeline", "content_format": "Content type", "platform": "Platform",
+            "target_page": "Page", "product_title": "Product", "status": "Status", "scheduled_for": "Scheduled for",
             "attempts": "Attempts", "caption": "Caption",
         })
     with tab_published:
         publications_table(engine, published, {
-            "id": "ID", "pipeline_id": "Pipeline", "platform": "Platform", "target_page": "Page",
-            "product_title": "Product", "published_at": "Published at", "platform_post_id": "Post ID",
+            "id": "ID", "pipeline_id": "Pipeline", "content_format": "Content type", "platform": "Platform",
+            "target_page": "Page", "product_title": "Product", "published_at": "Published at", "platform_post_id": "Post ID",
             "model_used": "Model", "generation_cost_usd": "AI cost (USD)", "caption": "Caption",
         })
     with tab_failed:
         publications_table(engine, failed, {
-            "id": "ID", "pipeline_id": "Pipeline", "platform": "Platform", "target_page": "Page",
-            "product_title": "Product", "error_message": "Error", "attempts": "Attempts", "created_at": "Created at",
+            "id": "ID", "pipeline_id": "Pipeline", "content_format": "Content type", "platform": "Platform",
+            "target_page": "Page", "product_title": "Product", "error_message": "Error", "attempts": "Attempts", "created_at": "Created at",
         })
         if failed:
             chosen = st.multiselect(
@@ -941,18 +1107,20 @@ def main() -> None:
 
     metrics = MetricsService(engine.db, engine.settings)
     st.title("⛵ Tarshish Engine")
-    st.caption("Automated affiliate content pipelines — admin & analytics")
+    st.caption("Two-stage affiliate engine — harvest products per category, publish per category × language")
     show_flash()
 
-    labels = [TAB_PIPELINES, TAB_KPIS, TAB_QUEUE]
-    default = _TAB_SLUGS.get(str(st.query_params.get("tab", "")).lower(), TAB_PIPELINES)  # deep link: ?tab=kpis
-    tab_pipelines, tab_kpis, tab_queue = st.tabs(labels, default=default)
-    with tab_pipelines:
-        render_pipelines_tab(engine)
-    with tab_kpis:
-        render_kpis_tab(engine, metrics)
-    with tab_queue:
-        render_queue_tab(engine)
+    labels = [TAB_CATEGORIES, TAB_ACCOUNTS, TAB_CONTENT, TAB_RUN]
+    default = _TAB_SLUGS.get(str(st.query_params.get("tab", "")).lower(), TAB_CATEGORIES)  # deep link: ?tab=run
+    tab_categories, tab_accounts, tab_content, tab_run = st.tabs(labels, default=default)
+    with tab_categories:
+        render_categories_tab(engine)
+    with tab_accounts:
+        render_accounts_tab(engine)
+    with tab_content:
+        render_content_tab(engine)
+    with tab_run:
+        render_run_tab(engine, metrics)
 
 
 main()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import PipelineConfig
+from core.config import ContentProfile, SocialAccount
 from core.interfaces import BaseGenerator, BasePublisher, BaseSource, BaseStorage, PluginContext
 from core.models import GeneratedContent, Product, PublishReceipt
 from dashboard.metrics_service import MetricsService
@@ -26,29 +26,33 @@ ROOT = Path(__file__).resolve().parents[1]
 # -- §1 directory & module structure ---------------------------------------------- #
 def test_specified_files_exist():
     expected = [
-        ".env.example", "requirements.txt", "README.md", "main.py", "config/pipelines.yaml",
+        ".env.example", "requirements.txt", "README.md", "main.py",
+        "config/categories.yaml", "config/content_profiles.yaml", "config/social_accounts.yaml",
         "core/__init__.py", "core/config.py", "core/models.py", "core/interfaces.py", "core/registry.py",
-        "core/database.py", "core/pipeline.py", "core/worker.py", "core/resilience.py",
+        "core/database.py", "core/harvester.py", "core/orchestrator.py", "core/worker.py", "core/resilience.py",
         "storage/__init__.py", "storage/local_storage.py", "storage/cloud_storage_stub.py",
         "plugins/sources/__init__.py", "plugins/sources/aliexpress_mock.py",
-        "plugins/generators/__init__.py", "plugins/generators/llm_text_gen.py", "plugins/generators/video_gen_stub.py",
+        "plugins/generators/__init__.py", "plugins/generators/llm_text_gen.py",
+        "plugins/generators/llm_story_gen.py", "plugins/generators/ffmpeg_video_gen.py",
         "plugins/publishers/__init__.py", "plugins/publishers/console_pub.py", "plugins/publishers/telegram_pub.py",
         "dashboard/metrics_service.py", "dashboard/app.py",
     ]
     missing = [path for path in expected if not (ROOT / path).is_file()]
     assert not missing
     assert (ROOT / "output").is_dir()
+    # Zero duplication: the per-language pipeline definitions are gone for good.
+    assert not (ROOT / "config" / "pipelines.yaml").exists() and not (ROOT / "core" / "pipeline.py").exists()
 
 
 # -- §2 core data models -------------------------------------------------------------- #
 def test_domain_models_expose_exactly_the_specified_fields():
     assert list(Product.model_fields) == [
-        "external_id", "source", "canonical_hash", "niche", "title", "price", "original_price", "currency",
+        "external_id", "source", "canonical_hash", "category", "title", "price", "original_price", "currency",
         "rating", "orders_count", "raw_url", "affiliate_url", "image_urls", "video_url",
     ]
     assert Product.model_fields["currency"].default == "ILS"
     assert list(GeneratedContent.model_fields) == [
-        "product", "content_type", "language", "caption", "hashtags", "media_local_path", "media_public_url",
+        "product", "content_type", "content_format", "language", "caption", "hashtags", "media_local_path", "media_public_url",
         "model_used", "tokens_input", "tokens_output", "generation_cost_usd",
     ]
     assert typing.get_args(GeneratedContent.model_fields["content_type"].annotation) == ("text", "video")
@@ -60,7 +64,7 @@ def test_domain_models_expose_exactly_the_specified_fields():
 # -- §3 plugin contracts ----------------------------------------------------------------- #
 def test_plugin_contracts_have_the_specified_members_and_signatures():
     contracts = {
-        BaseSource: ("source_name", "fetch_products", ["niche", "min_rating", "min_orders", "limit"]),
+        BaseSource: ("source_name", "fetch_products", ["category", "min_rating", "min_orders", "limit"]),
         BaseGenerator: ("generator_name", "generate", ["product", "language", "prompt_template"]),
         BasePublisher: ("platform_name", "publish", ["content"]),
     }
@@ -77,7 +81,7 @@ def test_plugin_contracts_have_the_specified_members_and_signatures():
 def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
     # _mock_catalogue is data, not a plugin
     assert engine.plugins.names("source") == ["aliexpress_mock", "aliexpress_rapidapi", "temu_mock", "temu_rapidapi"]
-    assert engine.plugins.names("generator") == ["llm_text_gen", "video_gen_stub"]
+    assert engine.plugins.names("generator") == ["ffmpeg_video_gen", "llm_story_gen", "llm_text_gen"]
     assert engine.plugins.names("publisher") == ["console_pub", "instagram_pub", "telegram_pub"]
     assert engine.plugins.names("storage") == ["cloud", "local"]
     assert engine.plugins.load_errors == {}
@@ -87,7 +91,7 @@ def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
 
 
 def test_a_new_plugin_file_is_picked_up_with_zero_core_changes(engine, tmp_path, monkeypatch):
-    """Drop a module into plugins/sources and it becomes usable from a pipeline."""
+    """Drop a module into plugins/sources and it can be harvested, then published from."""
     import plugins.sources as sources_package
     from core.registry import PluginRegistry
 
@@ -100,8 +104,8 @@ def test_a_new_plugin_file_is_picked_up_with_zero_core_changes(engine, tmp_path,
         "    @property\n"
         "    def source_name(self):\n"
         "        return 'demo_feed'\n\n"
-        "    def fetch_products(self, niche, min_rating, min_orders, limit):\n"
-        "        return [Product(external_id='d1', source='demo_feed', niche=niche, title='Demo Yoga Mat 6mm',\n"
+        "    def fetch_products(self, category, min_rating, min_orders, limit):\n"
+        "        return [Product(external_id='d1', source='demo_feed', category=category, title='Demo Yoga Mat 6mm',\n"
         "                        price=59.9, rating=4.9, orders_count=900, raw_url='https://shop.example/d1',\n"
         "                        affiliate_url='https://shop.example/aff/d1')]\n",
         encoding="utf-8",
@@ -110,11 +114,10 @@ def test_a_new_plugin_file_is_picked_up_with_zero_core_changes(engine, tmp_path,
     monkeypatch.setattr(engine.registry, "plugins", PluginRegistry().discover())
     assert "demo_feed" in engine.registry.plugins.names("source")
 
-    engine.registry.save_pipeline(PipelineConfig.model_validate({
-        "id": "yoga_en", "niche": "yoga", "language": "en", "source": "demo_feed",
-        "generator": "llm_text_gen", "llm_model": "mock", "publishers": ["console_pub"],
-    }))
-    report = engine.orchestrator.run("yoga_en")
+    monkeypatch.setattr(engine.harvester, "plugins", engine.registry.plugins)
+    assert engine.harvester.harvest("gadgets", "demo_feed")[0].ok  # a new store needs no schema change
+    console_profile(engine)
+    report = engine.orchestrator.run("gadgets", "en", ["console_post"], mode="immediate")
     assert report.ok and report.count("published") == 1
     sys.modules.pop("plugins.sources.demo_feed", None)
 
@@ -122,11 +125,16 @@ def test_a_new_plugin_file_is_picked_up_with_zero_core_changes(engine, tmp_path,
 # -- §5 / §9 database ---------------------------------------------------------------------- #
 def test_database_uses_wal_and_has_the_specified_schema(engine):
     spec = {
-        "pipelines": {"id", "type", "language", "source_plugin", "generator_plugin", "llm_model",
-                      "publishing_mode", "social_pages_json", "filters_json", "enabled", "created_at"},
-        "products": {"id", "external_id", "source", "canonical_hash", "niche", "title", "price",
+        "categories": {"category_id", "display_name_en", "display_name_he", "temu_search_json",
+                       "aliexpress_search_json", "min_rating", "min_orders", "enabled"},
+        "content_profiles": {"content_type", "platform", "generator", "llm_model", "publish_format", "tone",
+                             "prompt_template", "enabled"},
+        "social_accounts": {"category_id", "language", "platform", "account_handle", "token_env_var",
+                            "account_id_env_var", "enabled"},
+        "products": {"id", "external_id", "source", "canonical_hash", "category", "title", "price",
                      "affiliate_url", "created_at"},
-        "publications": {"id", "pipeline_id", "product_id", "platform", "content_type", "status", "caption",
+        "publications": {"id", "pipeline_id", "product_id", "category", "language", "content_format",
+                         "account_platform", "platform", "content_type", "status", "caption",
                          "media_uri", "model_used", "generation_cost_usd", "platform_post_id", "scheduled_for",
                          "published_at", "error_message"},
         "metrics_snapshots": {"id", "publication_id", "views", "clicks", "conversions", "revenue_usd", "recorded_at"},
@@ -143,6 +151,10 @@ def test_database_uses_wal_and_has_the_specified_schema(engine):
             indexed[columns] = bool(index["unique"])
         assert indexed.get(("source", "external_id")) is True  # UNIQUE (source, external_id)
         assert ("canonical_hash",) in indexed                    # index on canonical_hash
+        tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "pipelines" not in tables                          # a fresh database has no per-language pipelines
+        keys = [row["name"] for row in conn.execute("PRAGMA table_info(social_accounts)") if row["pk"]]
+        assert keys == ["category_id", "language", "platform"]
 
         publications_sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'publications'").fetchone()[0]
         for status in ("PENDING", "QUEUED", "PUBLISHED", "FAILED"):
@@ -155,7 +167,7 @@ def test_metrics_service_exposes_the_specified_aggregations(engine):
     assert {"total_views", "total_clicks", "total_conversions", "revenue_usd", "ai_spend_usd", "net_profit_usd",
             "total_text", "total_videos"} <= set(summary)
     assert metrics.get_metrics_by_platform() == []
-    assert sorted(row["pipeline_id"] for row in metrics.get_metrics_by_pipeline()) == ["gadgets_he", "sports_he"]
+    assert metrics.get_metrics_by_pipeline() == [] and metrics.get_metrics_by_content_type() == []
 
 
 # -- §6 resilience ------------------------------------------------------------------------------ #
@@ -185,8 +197,10 @@ def test_cli_exposes_the_specified_flags():
 
     actions = main.build_parser()._actions
     options = {option for action in actions for option in action.option_strings}
-    assert {"--pipeline", "--mode", "--limit", "--dry-run", "--stats", "--flush-queue", "--seed-storefront",
-            "--seed-temu", "--category", "--keyword", "--job"} <= options
+    assert {"--harvest", "--publish", "--source", "--category", "--lang", "--content-types", "--mode", "--limit",
+            "--dry-run", "--stats", "--flush-queue", "--sync-config", "--list-config", "--seed-storefront",
+            "--seed-temu", "--keyword", "--job"} <= options
+    assert "--pipeline" not in options
     mode = next(action for action in actions if "--mode" in action.option_strings)
     assert list(mode.choices) == ["immediate", "queued", "worker"]
 
@@ -200,46 +214,60 @@ def test_cli_dry_run_exits_cleanly(make_settings, monkeypatch, capsys):
     }.items():
         monkeypatch.setenv(name, str(value))
 
-    assert main.main(["--pipeline", "sports_he", "--mode", "immediate", "--dry-run"]) == 0
+    assert main.main(["--harvest", "--source", "aliexpress_mock", "--category", "sports"]) == 0
+    capsys.readouterr()
+    assert main.main(["--publish", "--category", "sports", "--lang", "he", "--mode", "immediate", "--dry-run"]) == 0
     assert capsys.readouterr().out.count("DRY-RUN PREVIEW") == 3
     assert main.main(["--stats"]) == 0
-    assert "Monthly AI spend" in capsys.readouterr().out
-    assert main.main(["--pipeline", "does_not_exist", "--dry-run"]) == 1
+    out = capsys.readouterr().out
+    assert "Monthly AI spend" in out and "sports/aliexpress_mock 3" in out
+    assert main.main(["--list-config"]) == 0
+    assert "instagram_story  enabled  instagram  llm_story_gen [claude-haiku-5-5]" in capsys.readouterr().out
+    assert main.main(["--publish", "--category", "does_not_exist", "--lang", "he", "--dry-run"]) == 1
 
 
 # -- stubs & storage --------------------------------------------------------------------------------------- #
-VIDEO_PIPELINE = {
-    "id": "sports_video", "niche": "running_and_sports", "language": "en", "source": "aliexpress_mock",
-    "generator": "video_gen_stub", "llm_model": "mock", "publishers": ["console_pub"],
-}
+def console_profile(engine, content_type="console_post", generator="llm_text_gen"):
+    """A credential-free route for one content type: console_pub accounts for gadgets/sports in he/en."""
+    engine.registry.save_content_profile(ContentProfile(
+        content_type=content_type, platform="console", generator=generator, llm_model="mock",
+    ))
+    for category in ("gadgets", "sports"):
+        for language in ("he", "en"):
+            engine.registry.save_social_account(SocialAccount(
+                category_id=category, language=language, platform="console", account_handle="default",
+            ))
 
 
-def test_video_stub_pipeline_runs_end_to_end(engine):
-    engine.registry.save_pipeline(PipelineConfig.model_validate(VIDEO_PIPELINE))
+def test_video_generator_runs_end_to_end(engine):
+    engine.harvester.harvest("sports", "aliexpress_mock")
+    console_profile(engine, "console_video", "ffmpeg_video_gen")
 
-    preview = engine.orchestrator.run("sports_video", limit=1, dry_run=True)
+    preview = engine.orchestrator.run("sports", "en", ["console_video"], limit=1, dry_run=True)
     jobs_dir = engine.settings.local_media_dir / "render_jobs"
     assert preview.count("preview") == 1 and not jobs_dir.exists()  # dry-run writes nothing
 
-    report = engine.orchestrator.run("sports_video", limit=1)
+    report = engine.orchestrator.run("sports", "en", ["console_video"], limit=1, mode="immediate")
     assert report.ok and report.count("published") == 1
-    assert engine.db.list_publications(pipeline_id="sports_video")[0]["content_type"] == "video"
-    assert len(list(jobs_dir.glob("*.json"))) == 1  # the render job a real renderer would consume
+    assert engine.db.list_publications(pipeline_id="sports_en")[0]["content_type"] == "video"
+    assert len(list(jobs_dir.glob("*.json"))) == 1  # rendering is off by default: the render job is written
 
 
 def test_rendered_media_is_handed_to_the_storage_backend(engine, tmp_path, monkeypatch):
-    video_stub = engine.plugins.get("generator", "video_gen_stub")
+    video = engine.plugins.get("generator", "ffmpeg_video_gen")
 
-    def render(self, product, language, script):
+    def render(self, product, language):
         path = tmp_path / "render.mp4"
         path.write_bytes(b"not really a video")
         return str(path)
 
-    monkeypatch.setattr(video_stub, "_render", render)
-    engine.registry.save_pipeline(PipelineConfig.model_validate(VIDEO_PIPELINE))
-    engine.orchestrator.run("sports_video", limit=1)
+    monkeypatch.setattr(video, "_render_enabled", lambda self: True)
+    monkeypatch.setattr(video, "_render", render)
+    engine.harvester.harvest("sports", "aliexpress_mock")
+    console_profile(engine, "console_video", "ffmpeg_video_gen")
+    engine.orchestrator.run("sports", "en", ["console_video"], limit=1, mode="immediate")
 
-    stored = Path(engine.db.list_publications(pipeline_id="sports_video")[0]["media_uri"])
+    stored = Path(engine.db.list_publications(pipeline_id="sports_en")[0]["media_uri"])
     media_root = engine.settings.local_media_dir.resolve()
     assert stored.is_file() and media_root in stored.resolve().parents and stored.suffix == ".mp4"
 
@@ -315,7 +343,8 @@ def test_env_example_documents_every_setting():
               "RAPIDAPI_KEY_TEMU_4", "TEMU_PROVIDERS_CONFIG_PATH",
               "RAPIDAPI_TEMU_HOST", "TEMU_TRACKING_ID", "TEMU_AFFILIATE_URL_TEMPLATE",
               "TEMU_MAX_ITEMS", "TEMU_CURRENCY", "TEMU_JOB_TIMEOUT", "INSTAGRAM_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID",
-              "INSTAGRAM_GRAPH_API_VERSION"}
+              "INSTAGRAM_GRAPH_API_VERSION", "VIDEO_RENDER_ENABLED",
+              "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN", "INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN"}
     assert not [name for name in sorted(names) if name not in example]
 
 

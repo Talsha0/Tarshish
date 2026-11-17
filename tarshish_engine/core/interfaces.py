@@ -10,7 +10,7 @@ concrete subclass into the matching package — no change to ``core/`` required:
     plugins/publishers/  -> BasePublisher   (Telegram, TikTok, YouTube Shorts, Instagram…)
     storage/             -> BaseStorage     (local disk, S3, Cloudinary…)
 
-A plugin is referenced from pipeline configuration by its module name
+A plugin is referenced from configuration by its module name
 (``plugins/sources/aliexpress_mock.py`` -> ``"aliexpress_mock"``) unless the
 class sets ``plugin_name``.
 """
@@ -33,16 +33,22 @@ class PluginContext:
     """Everything a plugin instance may need, injected by the registry."""
 
     settings: "Settings"
-    pipeline_id: str | None = None
+    pipeline_id: str | None = None               # publishing pipeline '<category>_<language>' (None while harvesting)
     llm_model: str | None = None                 # opaque model id / provider alias for generators
-    options: Mapping[str, Any] = field(default_factory=dict)   # free-form per-pipeline plugin options
+    # Free-form plugin options: a source gets {"search_config": <the category's rules for its store>},
+    # a generator gets {"content_type": "instagram_story", "tone": "..."} from its content profile.
+    options: Mapping[str, Any] = field(default_factory=dict)
     dry_run: bool = False                        # True: no paid API calls, no side effects
     budget_guard: "BudgetGuard | None" = None    # call ensure_within_budget() before paid LLM requests
     storage: "BaseStorage | None" = None
 
 
 class BaseSource(ABC):
-    """Fetches candidate products for a niche."""
+    """Fetches candidate products for a category (Stage 1: harvesting, language-agnostic).
+
+    Search terms come from the category's rules for the source's store, handed over as
+    ``context.options["search_config"]``.
+    """
 
     plugin_name: ClassVar[str | None] = None
 
@@ -55,7 +61,7 @@ class BaseSource(ABC):
         """Stable identifier stored in ``Product.source``."""
 
     @abstractmethod
-    def fetch_products(self, niche: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
+    def fetch_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
         """Return up to ``limit`` products matching the filters."""
 
 
@@ -77,8 +83,9 @@ class BaseGenerator(ABC):
     def generate(self, product: Product, language: str, prompt_template: str | None) -> GeneratedContent:
         """Produce content for ``product`` in ``language``.
 
-        ``prompt_template`` is the pipeline's optional custom prompt; ``None``
-        means "use the generator's default".
+        ``prompt_template`` is the content profile's optional custom prompt;
+        ``None`` means "use the generator's default". The profile's tone and
+        content type arrive in ``context.options``.
         """
 
     @classmethod
@@ -95,6 +102,8 @@ class BasePublisher(ABC):
     required_credentials: ClassVar[tuple[str, ...]] = ()
     # Fallback env-var names used when a social page does not reference its own.
     default_env_vars: ClassVar[Mapping[str, str]] = {}
+    # The credential a social account's ``account_id_env_var`` feeds (Instagram: account_id, Telegram: chat_id).
+    account_credential: ClassVar[str] = "account_id"
 
     def __init__(self, context: PluginContext, target: PublishTarget) -> None:
         self.context = context

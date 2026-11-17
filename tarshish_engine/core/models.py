@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Mapping, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 ContentType = Literal["text", "video"]
 
@@ -23,6 +23,11 @@ class PublicationStatus(str, Enum):
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def category_slug(value: str) -> str:
+    """URL-safe category id: 'Running & Sports' -> 'running-sports'."""
+    return re.sub(r"[\W_]+", "-", value.casefold()).strip("-")
 
 
 # Marketplace filler that differs between listings of the same item.
@@ -63,7 +68,7 @@ class Product(BaseModel):
     external_id: str = Field(min_length=1)
     source: str = Field(min_length=1)
     canonical_hash: str = Field(default="", description="Derived from the title when omitted.")
-    niche: str = Field(min_length=1, validation_alias=AliasChoices("niche", "category"))
+    category: str = Field(min_length=1)    # the harvesting category id (e.g. "gadgets")
     title: str = Field(min_length=3)
     price: float = Field(gt=0)
     original_price: Optional[float] = Field(default=None, gt=0)
@@ -116,11 +121,6 @@ class Product(BaseModel):
     def ref(self) -> str:
         return f"{self.source}:{self.external_id}"
 
-    @property
-    def category(self) -> str:
-        """The product's category as its pipeline names it (``Product(category=...)`` sets it)."""
-        return self.niche
-
 
 class GeneratedContent(BaseModel):
     """What a generator plugin produced for one product."""
@@ -129,6 +129,8 @@ class GeneratedContent(BaseModel):
 
     product: Product
     content_type: ContentType
+    # The content profile that produced it (``instagram_post``, ``instagram_story``…); ``None`` for legacy rows.
+    content_format: Optional[str] = None
     language: str = Field(min_length=2)
     caption: str = Field(min_length=1)
     hashtags: list[str] = Field(default_factory=list)

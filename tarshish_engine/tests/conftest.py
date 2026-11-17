@@ -57,7 +57,7 @@ def make_settings(tmp_path):
             database_path=tmp_path / "test.db",
             local_media_dir=tmp_path / "media",
             log_file=tmp_path / "logs" / "test.log",
-            pipelines_config_path=ROOT / "config" / "pipelines.yaml",
+            config_dir=ROOT / "config",
             max_monthly_ai_budget_usd=5.0,
             storage_mode="local",
             worker_active_hours_start=0,
@@ -74,3 +74,28 @@ def make_settings(tmp_path):
 @pytest.fixture
 def engine(make_settings):
     return bootstrap(settings=make_settings(), console_logging=False)
+
+
+@pytest.fixture
+def harvested(engine):
+    """Stage 1 done offline: the mock catalogues harvested into ``products`` (sports + gadgets)."""
+    engine.harvester.harvest("sports", "aliexpress_mock")
+    engine.harvester.harvest("gadgets", "temu_mock")
+    return engine
+
+
+@pytest.fixture
+def console_route(engine):
+    """A credential-free route: content type ``console_post`` ➔ console_pub accounts per category × language."""
+    from core.config import ContentProfile, SocialAccount
+
+    engine.registry.save_content_profile(ContentProfile(
+        content_type="console_post", platform="console", generator="llm_text_gen", llm_model="mock",
+    ))
+    for category in ("sports", "gadgets"):
+        for language in ("he", "en"):
+            engine.registry.save_social_account(SocialAccount(
+                category_id=category, language=language, platform="console",
+                account_handle=f"{category}_{language}_console",
+            ))
+    return engine

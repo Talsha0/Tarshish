@@ -101,7 +101,7 @@ def paid_settings(make_settings):
 def product(paid_settings):
     from plugins.sources.aliexpress_mock import AliExpressMockSource
 
-    return AliExpressMockSource(PluginContext(settings=paid_settings)).fetch_products("running_and_sports", 4.5, 200, 1)[0]
+    return AliExpressMockSource(PluginContext(settings=paid_settings)).fetch_products("sports", 4.5, 200, 1)[0]
 
 
 def generator(settings, model: str, spent: float = 0.0) -> LLMTextGenerator:
@@ -185,10 +185,22 @@ def test_gemini_quota_error_is_retried_and_bad_request_is_not(llm_server, paid_s
 
 
 def test_paid_pipeline_end_to_end_records_spend_and_respects_the_budget(llm_server, paid_settings):
-    """Source -> real SDK -> store -> publish, with the spend landing in the ledger."""
-    engine = bootstrap(settings=paid_settings, console_logging=False)
+    """Harvest -> real SDK -> store -> publish, with the spend landing in the ledger."""
+    from core.config import ContentProfile, SocialAccount
 
-    report = engine.orchestrator.run("sports_he", mode="immediate", limit=2)
+    engine = bootstrap(settings=paid_settings, console_logging=False)
+    engine.harvester.harvest("sports", "aliexpress_mock")
+    engine.registry.save_content_profile(ContentProfile(
+        content_type="console_post", platform="console", generator="llm_text_gen", llm_model="anthropic",
+    ))
+    engine.registry.save_social_account(SocialAccount(
+        category_id="sports", language="he", platform="console", account_handle="default",
+    ))
+
+    def run(**kwargs):
+        return engine.orchestrator.run("sports", "he", ["console_post"], **kwargs)
+
+    report = run(mode="immediate", limit=2)
 
     assert report.ok and report.count("published") == 2
     assert report.cost_usd == pytest.approx(2 * OPUS_COST)
@@ -198,11 +210,43 @@ def test_paid_pipeline_end_to_end_records_spend_and_respects_the_budget(llm_serv
 
     # Dry-run must never reach the provider, even with a key configured.
     llm_server.requests.clear()
-    assert engine.orchestrator.run("sports_he", dry_run=True, force=True).count("preview") == 3
+    assert run(dry_run=True, force=True).count("preview") == 3
     assert llm_server.requests == []
 
     # A cap below what is already spent halts before the next request is sent.
     engine.budget.max_monthly_usd = OPUS_COST
     with pytest.raises(BudgetExceededError):
-        engine.orchestrator.run("sports_he", force=True)
+        run(force=True)
     assert llm_server.requests == []
+
+
+def test_each_content_type_calls_its_own_model_and_each_language_its_own_account(llm_server, paid_settings, monkeypatch):
+    """The end-to-end routing check, live through the real SDK: harvest once, publish he + en."""
+    for name, value in {
+        "INSTAGRAM_ACCESS_TOKEN": "EAAGm0PX4ZCpsBAhe0123456789ZD", "INSTAGRAM_BUSINESS_ACCOUNT_ID": "17841400000000001",
+        "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN": "EAAGm0PX4ZCpsBAen0123456789ZD",
+        "INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN": "17841400000000002",
+    }.items():
+        monkeypatch.setenv(name, value)
+    engine = bootstrap(settings=paid_settings, console_logging=False)
+
+    [harvest] = engine.harvester.harvest("gadgets", "temu_mock")
+    assert len(harvest.inserted) == 3
+    for language in ("he", "en"):  # queued: content is generated for real, nothing is posted
+        report = engine.orchestrator.run(
+            "gadgets", language, ["instagram_post", "instagram_story"], mode="queued", limit=1,
+        )
+        assert report.ok and report.count("queued") == 2
+
+    # One harvested row per product, shared by both languages.
+    assert engine.db.query_one("SELECT COUNT(*) AS n FROM products WHERE category = 'gadgets'")["n"] == 3
+    # Four generations, each sent to the model its content profile routes to.
+    requested = [body["model"] for path, _, body in llm_server.requests if path.endswith("/messages")]
+    assert sorted(requested) == ["claude-haiku-5-5", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5"]
+    rows = engine.db.query(
+        "SELECT language, content_format, target_page FROM publications ORDER BY language, content_format"
+    )
+    assert [tuple(row.values()) for row in rows] == [
+        ("en", "instagram_post", "gadgets_en"), ("en", "instagram_story", "gadgets_en"),
+        ("he", "instagram_post", "gadgets"), ("he", "instagram_story", "gadgets"),
+    ]

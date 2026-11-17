@@ -5,9 +5,11 @@ the concrete contract implementations it finds — nothing in ``core/`` names a
 specific plugin, so new sources, generators, publishers and storage backends
 are picked up just by adding a file.
 
-``PipelineRegistry`` treats SQLite as the dynamic source of truth for pipeline
-definitions (seeded once from ``config/pipelines.yaml``) and turns a definition
-into live plugin instances, resolving credentials from environment variables.
+``ConfigRegistry`` treats SQLite as the dynamic source of truth for the three
+normalized configuration entities — categories, content profiles and social
+accounts — seeded once from ``config/*.yaml``. It also turns a social account +
+content profile into a live publisher, resolving credentials from environment
+variables.
 """
 
 from __future__ import annotations
@@ -16,18 +18,19 @@ import importlib
 import inspect
 import os
 import pkgutil
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic import SecretStr, ValidationError
 
 from core.config import (
-    PipelineConfig,
+    CategoryConfig,
+    ContentProfile,
     Settings,
+    SocialAccount,
     SocialPage,
     describe_validation_error,
-    load_pipelines_file,
+    load_seed_file,
 )
 from core.database import Database
 from core.interfaces import BaseGenerator, BasePublisher, BaseSource, BaseStorage, PluginContext
@@ -118,26 +121,16 @@ class PluginRegistry:
             raise PluginError(f"Unknown {kind} plugin '{name}'{detail}. Available: {available}.") from None
 
 
-@dataclass
-class WiredTarget:
-    page: SocialPage
-    publisher: BasePublisher
+# Seed file -> (table, model). Order matters for nothing but readable logs.
+CONFIG_ENTITIES: dict[str, tuple[str, type]] = {
+    "categories.yaml": ("categories", CategoryConfig),
+    "content_profiles.yaml": ("content_profiles", ContentProfile),
+    "social_accounts.yaml": ("social_accounts", SocialAccount),
+}
 
 
-@dataclass
-class WiredPipeline:
-    """A pipeline definition turned into live plugin instances."""
-
-    config: PipelineConfig
-    source: BaseSource
-    generator: BaseGenerator
-    storage: BaseStorage
-    targets: list[WiredTarget] = field(default_factory=list)
-    skipped: list[tuple[SocialPage, str]] = field(default_factory=list)  # (page, reason)
-
-
-class PipelineRegistry:
-    """Loads pipeline definitions from SQLite and wires them to plugins."""
+class ConfigRegistry:
+    """Reads and writes the normalized configuration in SQLite and wires publishers."""
 
     def __init__(self, settings: Settings, db: Database, plugins: PluginRegistry) -> None:
         self.settings = settings
@@ -147,101 +140,120 @@ class PipelineRegistry:
 
     # -- startup -------------------------------------------------------------- #
     def bootstrap(self) -> None:
-        """Validate the YAML file and seed the ``pipelines`` table when it is empty."""
+        """Validate every seed file and copy each one into its table while that table is empty.
+
+        After the first start SQLite is the source of truth: edit in the dashboard, or
+        push later YAML edits explicitly with :meth:`sync_from_yaml` (``--sync-config``).
+        """
         if not self.plugins.has("storage", self.settings.storage_mode):
             raise ConfigError(
                 f"STORAGE_MODE={self.settings.storage_mode!r} does not match a storage backend. "
                 f"Available: {', '.join(self.plugins.names('storage')) or 'none'}."
             )
+        for file_name, (table, _) in CONFIG_ENTITIES.items():
+            if self.db.count_rows(table) == 0:
+                rows = self._load_yaml(file_name)
+                for row in rows:
+                    self.db.upsert_config(table, row.to_record())
+                if rows:
+                    logger.info("Seeded %d %s row(s) from %s.", len(rows), table, file_name)
 
-        path = self.settings.pipelines_config_path
-        seeding = self.db.count_pipelines() == 0
-        if not path.is_file():
-            if seeding:
-                raise ConfigError(
-                    f"No pipelines are defined: the database is empty and {path} does not exist. "
-                    "Create the file (see README) or add a pipeline in the dashboard."
-                )
-            return
+    def sync_from_yaml(self) -> dict[str, int]:
+        """Upsert every row of the three seed files into the database (overwrites dashboard edits)."""
+        counts: dict[str, int] = {}
+        for file_name, (table, _) in CONFIG_ENTITIES.items():
+            rows = self._load_yaml(file_name)
+            for row in rows:
+                self.db.upsert_config(table, row.to_record())
+            counts[table] = len(rows)
+        return counts
 
-        pipelines = self._load_yaml(path)
-        if seeding:
-            for pipeline in pipelines:
-                self.db.upsert_pipeline(pipeline.to_record())
-            logger.info("Seeded %d pipeline(s) into the database from %s.", len(pipelines), path.name)
-
-    def sync_from_yaml(self) -> int:
-        """Upsert every pipeline of the YAML file into the database (explicit re-sync)."""
-        pipelines = self._load_yaml(self.settings.pipelines_config_path)
-        for pipeline in pipelines:
-            self.db.upsert_pipeline(pipeline.to_record())
-        return len(pipelines)
-
-    def _load_yaml(self, path: Path) -> list[PipelineConfig]:
-        pipelines = load_pipelines_file(path)
-        problems = [
-            f"  - pipeline '{pipeline.id}': {problem}"
-            for pipeline in pipelines
-            for problem in self.plugin_problems(pipeline)
-        ]
+    def _load_yaml(self, file_name: str) -> list[Any]:
+        path = Path(self.settings.config_dir) / file_name
+        rows = load_seed_file(path)
+        problems = [problem for row in rows for problem in self.plugin_problems(row)]
         if problems:
-            raise ConfigError(f"Invalid pipeline configuration in {path}:\n" + "\n".join(problems))
-        return pipelines
+            raise ConfigError(f"Invalid configuration in {path}:\n" + "\n".join(f"  - {p}" for p in problems))
+        return rows
 
-    # -- definitions ---------------------------------------------------------- #
-    def list_pipelines(self, enabled_only: bool = False) -> list[PipelineConfig]:
-        """Read pipelines straight from SQLite, so dashboard edits apply immediately."""
-        pipelines: list[PipelineConfig] = []
-        for row in self.db.list_pipelines(enabled_only=enabled_only):
+    def plugin_problems(self, row: Any) -> list[str]:
+        """Human-readable problems with the plugin names a configuration row refers to."""
+        if isinstance(row, ContentProfile) and not self.plugins.has("generator", row.generator):
+            available = ", ".join(self.plugins.names("generator")) or "none"
+            return [f"content type '{row.content_type}': unknown generator plugin '{row.generator}' "
+                    f"(available: {available})"]
+        return []
+
+    # -- generic table access ---------------------------------------------------- #
+    def _rows(self, table: str, model: type, enabled_only: bool) -> list[Any]:
+        rows: list[Any] = []
+        for record in self.db.list_config(table, enabled_only=enabled_only):
             try:
-                pipelines.append(PipelineConfig.from_record(row))
+                rows.append(model.from_record(record))
             except ValidationError as exc:  # a corrupt row must not hide the healthy ones
-                logger.error(
-                    "Pipeline row '%s' is invalid and was skipped: %s",
-                    row.get("id"), "; ".join(describe_validation_error(exc)),
-                )
-        return pipelines
+                logger.error("Invalid %s row %s skipped: %s", table, record, "; ".join(describe_validation_error(exc)))
+        return rows
 
-    def get_pipeline(self, pipeline_id: str) -> PipelineConfig:
-        row = self.db.get_pipeline(pipeline_id)
-        if row is None:
-            known = ", ".join(r["id"] for r in self.db.list_pipelines()) or "none"
-            raise PipelineError(f"Unknown pipeline '{pipeline_id}'. Known pipelines: {known}.")
-        try:
-            return PipelineConfig.from_record(row)
-        except ValidationError as exc:
-            raise PipelineError(
-                f"Pipeline '{pipeline_id}' has an invalid stored configuration: "
-                + "; ".join(describe_validation_error(exc))
-            ) from exc
-
-    def save_pipeline(self, pipeline: PipelineConfig) -> None:
-        problems = self.plugin_problems(pipeline)
+    def _save(self, table: str, row: Any) -> None:
+        problems = self.plugin_problems(row)
         if problems:
             raise PipelineError("; ".join(problems))
-        self.db.upsert_pipeline(pipeline.to_record())
-        logger.info("Pipeline '%s' saved.", pipeline.id)
+        self.db.upsert_config(table, row.to_record())
 
-    def set_enabled(self, pipeline_id: str, enabled: bool) -> None:
-        if not self.db.set_pipeline_enabled(pipeline_id, enabled):
-            raise PipelineError(f"Unknown pipeline '{pipeline_id}'.")
-        logger.info("Pipeline '%s' %s.", pipeline_id, "enabled" if enabled else "disabled")
+    # -- categories ----------------------------------------------------------------- #
+    def list_categories(self, enabled_only: bool = False) -> list[CategoryConfig]:
+        return self._rows("categories", CategoryConfig, enabled_only)
 
-    def delete_pipeline(self, pipeline_id: str) -> None:
-        if not self.db.delete_pipeline(pipeline_id):
-            raise PipelineError(f"Unknown pipeline '{pipeline_id}'.")
-        logger.info("Pipeline '%s' deleted.", pipeline_id)
+    def get_category(self, category_id: str) -> CategoryConfig:
+        record = self.db.get_config("categories", category_id)
+        if record is None:
+            known = ", ".join(c.category_id for c in self.list_categories()) or "none"
+            raise PipelineError(f"Unknown category '{category_id}'. Known categories: {known}.")
+        return CategoryConfig.from_record(record)
 
-    def plugin_problems(self, pipeline: PipelineConfig) -> list[str]:
-        """Human-readable problems with the plugin names a pipeline refers to."""
-        problems: list[str] = []
-        references = [("source", pipeline.source), ("generator", pipeline.generator)]
-        references += [("publisher", name) for name in pipeline.publishers]
-        for kind, name in references:
-            if not self.plugins.has(kind, name):
-                available = ", ".join(self.plugins.names(kind)) or "none"
-                problems.append(f"unknown {kind} plugin '{name}' (available: {available})")
-        return problems
+    def save_category(self, category: CategoryConfig) -> None:
+        self._save("categories", category)
+        logger.info("Category '%s' saved.", category.category_id)
+
+    # -- content profiles --------------------------------------------------------------- #
+    def list_content_profiles(self, enabled_only: bool = False) -> list[ContentProfile]:
+        return self._rows("content_profiles", ContentProfile, enabled_only)
+
+    def get_content_profile(self, content_type: str) -> ContentProfile:
+        record = self.db.get_config("content_profiles", content_type)
+        if record is None:
+            known = ", ".join(p.content_type for p in self.list_content_profiles()) or "none"
+            raise PipelineError(f"Unknown content type '{content_type}'. Known content types: {known}.")
+        return ContentProfile.from_record(record)
+
+    def save_content_profile(self, profile: ContentProfile) -> None:
+        self._save("content_profiles", profile)
+        logger.info("Content profile '%s' saved (%s, %s).", profile.content_type, profile.generator, profile.llm_model)
+
+    # -- social accounts ------------------------------------------------------------------ #
+    def list_social_accounts(
+        self, *, category: str | None = None, language: str | None = None, platform: str | None = None,
+        enabled_only: bool = False,
+    ) -> list[SocialAccount]:
+        return [
+            account for account in self._rows("social_accounts", SocialAccount, enabled_only)
+            if (category is None or account.category_id == category)
+            and (language is None or account.language == language)
+            and (platform is None or account.platform == platform)
+        ]
+
+    def get_social_account(self, category: str, language: str, platform: str) -> SocialAccount | None:
+        record = self.db.get_config("social_accounts", category, language, platform)
+        return SocialAccount.from_record(record) if record else None
+
+    def save_social_account(self, account: SocialAccount) -> None:
+        self._save("social_accounts", account)
+        logger.info("Social account %s saved.", account.label)
+
+    def languages(self) -> list[str]:
+        """Every language that has at least one social account, Hebrew and English first."""
+        found = {account.language for account in self.list_social_accounts()}
+        return sorted(found | {"he", "en"}, key=lambda code: ({"he": 0, "en": 1}.get(code, 2), code))
 
     # -- wiring --------------------------------------------------------------- #
     def storage(self) -> BaseStorage:
@@ -250,17 +262,27 @@ class PipelineRegistry:
         return self._storage
 
     def context_for(
-        self, pipeline: PipelineConfig, *, dry_run: bool = False, budget_guard: BudgetGuard | None = None
+        self, *, pipeline_id: str | None = None, llm_model: str | None = None, options: dict[str, Any] | None = None,
+        dry_run: bool = False, budget_guard: BudgetGuard | None = None,
     ) -> PluginContext:
         return PluginContext(
-            settings=self.settings,
-            pipeline_id=pipeline.id,
-            llm_model=pipeline.llm_model,
-            options=dict(pipeline.options),
-            dry_run=dry_run,
-            budget_guard=budget_guard,
-            storage=self.storage(),
+            settings=self.settings, pipeline_id=pipeline_id, llm_model=llm_model, options=dict(options or {}),
+            dry_run=dry_run, budget_guard=budget_guard, storage=self.storage(),
         )
+
+    def social_page(self, account: SocialAccount, profile: ContentProfile | None = None) -> SocialPage:
+        """The publisher-facing target for one account, publishing in ``profile``'s format."""
+        page: dict[str, Any] = {"platform": account.publisher, "page_name": account.account_handle}
+        if account.token_env_var:
+            page["token_env_var"] = account.token_env_var
+        if account.account_id_env_var:
+            credential = "account_id"
+            if self.plugins.has("publisher", account.publisher):
+                credential = self.plugins.get("publisher", account.publisher).account_credential
+            page[f"{credential}_env_var"] = account.account_id_env_var
+        if profile is not None and profile.publish_format:
+            page["content_type"] = profile.publish_format
+        return SocialPage.model_validate(page)
 
     def resolve_target(self, page: SocialPage) -> tuple[PublishTarget | None, str | None]:
         """Resolve a social page's credentials from the environment.
@@ -304,26 +326,3 @@ class PipelineRegistry:
             return self.plugins.get("publisher", page.platform)(context, target), None
         except Exception as exc:
             return None, f"publisher could not be initialised: {type(exc).__name__}: {exc}"
-
-    def wire(
-        self, pipeline: PipelineConfig, *, dry_run: bool = False, budget_guard: BudgetGuard | None = None
-    ) -> WiredPipeline:
-        """Instantiate the pipeline's plugins. Unusable targets are skipped, not fatal."""
-        context = self.context_for(pipeline, dry_run=dry_run, budget_guard=budget_guard)
-        wired = WiredPipeline(
-            config=pipeline,
-            source=self.plugins.get("source", pipeline.source)(context),
-            generator=self.plugins.get("generator", pipeline.generator)(context),
-            storage=self.storage(),
-        )
-        for page in pipeline.social_pages:
-            publisher, reason = self.build_publisher(page, context)
-            if publisher is None:
-                wired.skipped.append((page, reason or "unknown reason"))
-                logger.warning(
-                    "Pipeline '%s': skipping target %s — %s. Other targets are unaffected.",
-                    pipeline.id, page.label, reason,
-                )
-            else:
-                wired.targets.append(WiredTarget(page=page, publisher=publisher))
-        return wired

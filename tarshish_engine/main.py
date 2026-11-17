@@ -1,21 +1,27 @@
 #!/usr/bin/env python
-"""Tarshish Engine command line.
+"""Tarshish Engine command line — a two-stage, decoupled affiliate engine.
 
-Examples
---------
-    python main.py --pipeline sports_he --mode immediate --dry-run   # simulate, publish nothing
-    python main.py --pipeline sports_he --mode immediate             # generate and publish now
-    python main.py --pipeline sports_he --mode queued                # generate and queue
-    python main.py --mode worker                                     # publish the queue with jitter
-    python main.py --stats                                           # queue size, published, AI spend
-    python main.py --flush-queue                                     # drop pending/queued items
-    python main.py --seed-storefront                                 # load the storefront demo catalogue
-    python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
-                                                                     # real Temu products via the provider chain, no LLM
-    python main.py --seed-aliexpress --category gadgets --keyword "smart watch" --limit 10
-                                                                     # real AliExpress products via the failover chain, no LLM
-    python main.py --verify-instagram                                # read-only Instagram token / account / permission check
-    python main.py --verify-instagram --pipeline gadgets_he          # check that pipeline's Instagram pages
+Stage 1 · harvest (language-agnostic, per category × source, no LLM)
+    python main.py --harvest                                   # every enabled category, every store it has rules for
+    python main.py --harvest --category gadgets                # one category
+    python main.py --harvest --source temu_rapidapi            # one store, every category
+    python main.py --harvest --source temu_mock --category gadgets   # offline catalogue, no API quota
+
+Stage 2 · publish (per category × language × content types, reads harvested products)
+    python main.py --publish --category gadgets --lang he --content-types instagram_post,instagram_story
+    python main.py --publish --category gadgets --lang en --dry-run    # simulate: no posts, no paid LLM, no writes
+    python main.py --publish --category gadgets                        # every language with an enabled account
+    python main.py --mode worker                                       # publish the queue with human-like pacing
+
+Management
+    python main.py --list-config        # categories, content-type routing and the social-accounts matrix
+    python main.py --sync-config        # push config/*.yaml into the database (overwrites dashboard edits)
+    python main.py --stats              # queue size, published count and monthly AI spend
+    python main.py --flush-queue        # drop pending/queued items   (--category/--lang narrow it)
+    python main.py --retry-failed       # re-queue failed items        (--category/--lang narrow it)
+    python main.py --seed-storefront    # load the storefront demo catalogue
+    python main.py --seed-temu --category gadgets --keyword "smart watch" --limit 10   # ad-hoc keyword harvest
+    python main.py --verify-instagram [--category gadgets --lang he]   # read-only Instagram connection check
 """
 
 from __future__ import annotations
@@ -26,8 +32,7 @@ import sys
 EXIT_OK, EXIT_FAILURES, EXIT_CONFIG, EXIT_BUDGET = 0, 1, 2, 3
 _RULE = "─" * 78
 _MARKS = {
-    "published": "✓", "queued": "⏱", "preview": "•", "skipped": "-", "partial": "!", "failed": "✗",
-    "unavailable": "!",
+    "published": "✓", "queued": "⏱", "preview": "•", "skipped": "-", "failed": "✗", "inserted": "✓",
 }
 
 
@@ -73,93 +78,160 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _content_types(value: str) -> list[str]:
+    names = [name.strip() for name in value.split(",") if name.strip()]
+    if not names:
+        raise argparse.ArgumentTypeError("name at least one content type, e.g. instagram_post,instagram_story")
+    return names
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Automated affiliate content pipelines: fetch products, generate content, publish or queue.",
-        epilog=__doc__.split("Examples\n--------\n", 1)[1],
+        description="Two-stage affiliate engine: harvest products per category, then publish localized content "
+                    "per category × language × content type.",
+        epilog=__doc__.split("\n\n", 1)[1],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    run = parser.add_argument_group("running pipelines")
-    run.add_argument("--pipeline", metavar="ID", help="pipeline id (default: every enabled pipeline)")
+    stages = parser.add_argument_group("stages")
+    stages.add_argument("--harvest", action="store_true",
+                        help="Stage 1: fetch products per (category, source) into SQLite — once, for every language")
+    stages.add_argument("--publish", action="store_true",
+                        help="Stage 2: generate and publish content for harvested products per (category, language)")
+
+    scope = parser.add_argument_group("scope")
+    scope.add_argument("--category", metavar="ID", help="category id (default: every enabled category)")
+    scope.add_argument("--source", metavar="PLUGIN",
+                       help="with --harvest: one source plugin, e.g. temu_rapidapi, aliexpress_rapidapi, temu_mock "
+                            "(default: every store the category has search rules for)")
+    scope.add_argument("--lang", metavar="CODE",
+                       help="with --publish: language, e.g. he or en (default: every language with an enabled account)")
+    scope.add_argument("--content-types", type=_content_types, metavar="LIST",
+                       help="with --publish: comma-separated content types, e.g. instagram_post,instagram_story "
+                            "(default: every enabled type with an account)")
+
+    run = parser.add_argument_group("run options")
     run.add_argument(
         "--mode", choices=["immediate", "queued", "worker"],
         help="immediate: publish now · queued: store for the worker · worker: consume the queue "
-             "(default: each pipeline's configured publishing mode)",
+             "(default for --publish: PUBLISHING_MODE, queued)",
     )
-    run.add_argument("--limit", type=_positive_int, metavar="N", help="max products to handle per pipeline")
-    run.add_argument(
-        "--dry-run", action="store_true",
-        help="simulate the full pipeline and print the result: no publishing, no paid LLM calls, no DB writes",
-    )
-    run.add_argument("--force", action="store_true", help="re-process products that were already published/queued")
+    run.add_argument("--limit", type=_positive_int, metavar="N",
+                     help="--harvest: products kept per (category, source) · --publish: products per content type")
+    run.add_argument("--dry-run", action="store_true",
+                     help="simulate: no publishing, no paid LLM calls, no API quota, no database writes")
+    run.add_argument("--force", action="store_true", help="with --publish: re-process products already handled")
     run.add_argument("--once", action="store_true", help="with --mode worker: publish what is due, then exit")
 
     manage = parser.add_argument_group("management")
     manage.add_argument("--stats", action="store_true", help="print queue size, published count and monthly AI spend")
     manage.add_argument("--flush-queue", action="store_true", help="delete pending/queued publications")
     manage.add_argument("--retry-failed", action="store_true", help="put failed publications back in the queue")
-    manage.add_argument("--list-pipelines", action="store_true", help="list pipelines stored in the database")
-    manage.add_argument(
-        "--sync-config", action="store_true", help="upsert config/pipelines.yaml into the database (overwrites edits)"
-    )
-    manage.add_argument(
-        "--seed-storefront", action="store_true",
-        help="load the demo catalogue (14 mock products, two stores) into the FindHub storefront",
-    )
-    manage.add_argument(
-        "--seed-temu", action="store_true",
-        help="load real Temu products into the storefront through the RapidAPI provider chain, no LLM calls "
-             "(needs --category; --keyword and --limit are optional)",
-    )
-    manage.add_argument(
-        "--seed-aliexpress", action="store_true",
-        help="load real AliExpress products into the storefront through the RapidAPI failover chain, no LLM calls "
-             "(needs --category; --keyword and --limit are optional)",
-    )
-    manage.add_argument(
-        "--category", metavar="NAME",
-        help="with --seed-temu / --seed-aliexpress: storefront category to file the products under",
-    )
-    manage.add_argument(
-        "--keyword", metavar="TEXT",
-        help="with --seed-temu / --seed-aliexpress: search terms (default: the category name)",
-    )
-    manage.add_argument(
-        "--job", metavar="ID",
-        help="with --seed-temu: collect the results of an earlier search job instead of starting a new search",
-    )
-    manage.add_argument(
-        "--verify-instagram", action="store_true",
-        help="check the Instagram API with Unified Login connection (token, professional account, publishing "
-             "permissions) with read-only calls; with --pipeline, check that pipeline's Instagram pages",
-    )
+    manage.add_argument("--list-config", action="store_true",
+                        help="print categories, content-type routing and the social-accounts matrix")
+    manage.add_argument("--sync-config", action="store_true",
+                        help="upsert config/categories.yaml, content_profiles.yaml and social_accounts.yaml "
+                             "into the database (overwrites dashboard edits)")
+    manage.add_argument("--seed-storefront", action="store_true",
+                        help="load the demo catalogue (14 mock products, two stores) into the FindHub storefront")
+    manage.add_argument("--seed-temu", action="store_true",
+                        help="ad-hoc --harvest --source temu_rapidapi with an optional --keyword override (needs --category)")
+    manage.add_argument("--seed-aliexpress", action="store_true",
+                        help="ad-hoc --harvest --source aliexpress_rapidapi with an optional --keyword override "
+                             "(needs --category)")
+    manage.add_argument("--keyword", metavar="TEXT", help="with --seed-temu / --seed-aliexpress: search terms")
+    manage.add_argument("--job", metavar="ID",
+                        help="with --seed-temu: collect the results of an earlier search job instead of searching")
+    manage.add_argument("--verify-instagram", action="store_true",
+                        help="check the Instagram accounts of the matrix (token, professional account, publishing "
+                             "permissions) with read-only calls; --category / --lang narrow it")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="override LOG_LEVEL")
     return parser
+
+
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    seeding = args.seed_temu or args.seed_aliexpress
+    if args.harvest and args.publish:
+        parser.error("run --harvest and --publish separately: they are independent stages")
+    if args.mode == "worker" and (args.harvest or args.publish or args.dry_run or args.limit or args.force):
+        parser.error("--mode worker consumes the queue; it cannot be combined with --harvest/--publish/--limit/"
+                     "--dry-run/--force")
+    if args.once and args.mode != "worker":
+        parser.error("--once only applies to --mode worker")
+    if args.mode in ("immediate", "queued") and not args.publish:
+        parser.error(f"--mode {args.mode} only applies to --publish")
+    if args.source and not args.harvest:
+        parser.error("--source only applies to --harvest")
+    if (args.content_types or args.force) and not args.publish:
+        parser.error("--content-types and --force only apply to --publish")
+    if args.lang and not (args.publish or args.verify_instagram or args.flush_queue or args.retry_failed
+                          or args.stats):
+        parser.error("--lang applies to --publish (and narrows --verify-instagram, --flush-queue, --retry-failed, "
+                     "--stats)")
+    if args.seed_temu and args.seed_aliexpress:
+        parser.error("run --seed-temu and --seed-aliexpress separately (they share --category/--keyword/--limit)")
+    if seeding:
+        flag = "--seed-temu" if args.seed_temu else "--seed-aliexpress"
+        if not args.category:
+            parser.error(f"{flag} needs --category NAME (for example: --category gadgets)")
+        if args.dry_run or args.mode or args.harvest or args.publish:
+            parser.error(f"{flag} makes real API requests and writes products; "
+                         "it cannot be combined with --dry-run, --mode, --harvest or --publish")
+        if args.job and not args.seed_temu:
+            parser.error("--job only applies to --seed-temu (AliExpress searches answer at once)")
+    elif args.keyword or args.job:
+        parser.error("--keyword and --job only apply to --seed-temu / --seed-aliexpress "
+                     "(--harvest uses the category's stored search rules)")
+    if args.verify_instagram and (args.dry_run or args.mode or args.limit or args.force):
+        parser.error("--verify-instagram only reads from the API; it takes --category / --lang and nothing else")
 
 
 # --------------------------------------------------------------------------- #
 # Output helpers
 # --------------------------------------------------------------------------- #
+def _clip(text: str, width: int) -> str:
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def print_harvest(report) -> None:
+    from plugins import format_price
+
+    flags = " · DRY-RUN (nothing written)" if report.dry_run else ""
+    print(_RULE)
+    print(f" Harvest {report.source} ➔ category {report.category} · keyword \"{report.keyword}\" · "
+          f"provider {report.provider or 'none delivered'}{flags}")
+    for attempt in report.attempts:
+        print(f"   {'✓' if attempt.ok else '✗'} provider   {attempt.provider:<24} {attempt.outcome:<16} {attempt.detail}")
+    print(f" received {report.received} · inserted {len(report.inserted)} · already stored {len(report.duplicates)}"
+          f" · {len(report.over_limit)} beyond the limit · {len(report.rejected)} rejected"
+          f" (standard: rating ≥ {report.min_rating:g}, orders ≥ {report.min_orders:,})")
+    for status, products in (("inserted", report.inserted), ("stored", report.duplicates)):
+        for product in products:
+            print(f"   {'✓' if status == 'inserted' else '-'} {status:<9} {product.external_id:<16} "
+                  f"⭐ {product.rating:<4g}{product.orders_count:>9,} sold "
+                  f"{format_price(product.price, product.currency):>9}  {_clip(product.title, 38)}")
+    if report.error:
+        print(f"   ✗ {report.error}")
+    print(_RULE)
+
+
 def print_report(report) -> None:
     flags = " · DRY-RUN" if report.dry_run else ""
     print(_RULE)
-    print(f" Pipeline {report.pipeline_id} · mode {report.mode}{flags}")
-    print(
-        f" fetched {report.fetched} · published {report.count('published')} · queued {report.count('queued')}"
-        f" · previewed {report.count('preview')} · skipped {report.count('skipped')}"
-        f" · failed {report.count('failed', 'partial')} · AI cost ${report.cost_usd:.4f}"
-    )
+    print(f" Publishing pipeline {report.pipeline_id} · category {report.category} · language {report.language}"
+          f" · mode {report.mode}{flags}")
+    for route in report.routes:
+        account = f"{route.publisher} → {route.account}" if route.account else "no account"
+        state = "ready" if route.ready else (route.reason or "not ready")
+        print(f"   ▸ {route.content_type:<16} {route.generator} [{route.llm_model}] ➔ {account}"
+              f" · {route.candidates} product(s) · {_clip(state, 60)}")
+    print(f" published {report.count('published')} · queued {report.count('queued')} · previewed "
+          f"{report.count('preview')} · failed {report.count('failed')} · AI cost ${report.cost_usd:.4f}")
     for item in report.items:
-        title = item.title if len(item.title) <= 58 else item.title[:57] + "…"
-        print(f"   {_MARKS.get(item.status, '?')} {item.status:<9} {title}")
-        for target in item.targets:
-            # Why a target is unavailable is the same for every item: it is printed once, as a warning.
-            show_detail = target.detail and target.status not in ("preview", "unavailable")
-            detail = f" — {target.detail}" if show_detail else ""
-            print(f"       {_MARKS.get(target.status, '?')} {target.platform} → {target.page_name}: {target.status}{detail}")
-        if item.detail and not item.targets:
-            print(f"       {item.detail}")
+        print(f"   {_MARKS.get(item.status, '?')} {item.status:<9} {item.content_type:<16} {_clip(item.title, 44)}")
+        written = "" if item.model_used == item.configured_model else f" (written by: {item.model_used})"
+        print(f"       {item.target} · model {item.configured_model}{written}"
+              + (f" — {item.detail}" if item.detail and item.status != "preview" else ""))
     for warning in report.warnings:
         print(f"   ! {warning}")
     if report.error:
@@ -180,18 +252,32 @@ def cmd_stats(engine, pipeline_id: str | None) -> None:
     print(f"   Published         : {counts['PUBLISHED']}")
     print(f"   Failed            : {counts['FAILED']}")
     print(f"   Monthly AI spend  : ${spent:.4f} of ${cap:.2f} ({used})")
+    inventory = engine.db.count_products()
+    if inventory:
+        print("   Harvested products: " + ", ".join(
+            f"{row['category'] or '(unlisted)'}/{row['source']} {row['products']}" for row in inventory))
     print(_RULE)
 
 
-def cmd_list_pipelines(engine) -> None:
-    pipelines = engine.registry.list_pipelines()
+def cmd_list_config(engine) -> None:
+    registry = engine.registry
     print(_RULE)
-    print(f" {len(pipelines)} pipeline(s) in {engine.settings.database_path.name}")
-    for p in pipelines:
-        state = "enabled " if p.enabled else "disabled"
-        pages = ", ".join(page.label for page in p.social_pages)
-        print(f"   {p.id:<18} {state} {p.language}  {p.source} ➔ {p.generator} [{p.llm_model}] ➔ {pages}"
-              f"  ({p.publishing_mode})")
+    print(" Categories (Stage 1 · harvested once per source, shared by every language)")
+    for c in registry.list_categories():
+        stores = ", ".join(c.default_sources()) or "no store rules"
+        print(f"   {c.category_id:<12} {'enabled ' if c.enabled else 'disabled'} {c.display_name_en} / "
+              f"{c.display_name_he or '-'} · rating ≥ {c.min_rating:g} · orders ≥ {c.min_orders:,} · {stores}")
+    print(" Content types (Stage 2 · generator + model routing)")
+    for p in registry.list_content_profiles():
+        print(f"   {p.content_type:<16} {'enabled ' if p.enabled else 'disabled'} {p.platform:<10} "
+              f"{p.generator} [{p.llm_model}]" + (f" · format {p.publish_format}" if p.publish_format else ""))
+    print(" Social accounts (category × language × platform)")
+    for a in registry.list_social_accounts():
+        refs = ", ".join(name for name in (a.token_env_var, a.account_id_env_var) if name) or "publisher defaults"
+        _, reason = registry.resolve_target(registry.social_page(a))
+        state = "ready" if reason is None else "credentials missing"
+        print(f"   {a.category_id:<10} {a.language:<3} {a.platform:<10} {a.account_handle:<20} "
+              f"{'enabled ' if a.enabled else 'disabled'} {state:<20} env: {refs}")
     print(_RULE)
 
 
@@ -202,6 +288,7 @@ _SEED_LABELS = {  # source plugin -> (store name, tracking variable, chain file)
 
 
 def print_seed(report, limit: int) -> None:
+    """The --seed-temu / --seed-aliexpress report (an ad-hoc harvest with a keyword override)."""
     from plugins import format_price, is_placeholder_image
 
     store, tracking_var, chain_file = _SEED_LABELS.get(report.source, _SEED_LABELS["temu_rapidapi"])
@@ -242,16 +329,16 @@ def print_seed(report, limit: int) -> None:
     print(_RULE)
 
 
-def cmd_verify_instagram(engine, pipeline_id: str | None) -> bool:
+def cmd_verify_instagram(engine, category: str | None, language: str | None) -> bool:
     """Print a read-only connection report for each Instagram account; True when all are ready."""
     from plugins.publishers.instagram_pub import pages_to_verify, verify_pages
 
-    pages = pages_to_verify(engine.registry, pipeline_id)
+    pages = pages_to_verify(engine.registry, category, language)
     print(_RULE)
-    scope = f"pipeline {pipeline_id}" if pipeline_id else "configured accounts"
+    scope = "/".join(part for part in (category, language) if part) or "configured accounts"
     print(f" Instagram API with Unified Login · connection check · {scope} · nothing is posted")
     if not pages:
-        print(f"   ! Pipeline {pipeline_id} has no instagram_pub social page.")
+        print(f"   ! No Instagram account is configured for {scope} (Social Accounts tab / config/social_accounts.yaml).")
         print(_RULE)
         return False
     results = verify_pages(engine.registry, pages)
@@ -269,22 +356,27 @@ def cmd_verify_instagram(engine, pipeline_id: str | None) -> bool:
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
-def run_pipelines(engine, args) -> int:
-    from core.resilience import BudgetExceededError, PipelineError
+def run_harvest(engine, args) -> int:
+    reports = engine.harvester.harvest(args.category, args.source, limit=args.limit, dry_run=args.dry_run)
+    for report in reports:
+        print_harvest(report)
+    return EXIT_OK if all(report.ok for report in reports) else EXIT_FAILURES
 
-    if args.pipeline:
-        pipeline_ids = [args.pipeline]
-    else:
-        pipeline_ids = [p.id for p in engine.registry.list_pipelines(enabled_only=True)]
-        if not pipeline_ids:
-            print("No enabled pipelines. Enable one in the dashboard or pass --pipeline ID.", file=sys.stderr)
-            return EXIT_FAILURES
 
+def run_publish(engine, args) -> int:
+    from core.resilience import BudgetExceededError
+
+    pairs = engine.orchestrator.plan(args.category, args.lang)
+    if not pairs:
+        print("Nothing to publish: no enabled social account matches. Link one in the dashboard "
+              "(Social Accounts tab) or config/social_accounts.yaml.", file=sys.stderr)
+        return EXIT_FAILURES
     exit_code = EXIT_OK
-    for pipeline_id in pipeline_ids:
+    for category, language in pairs:
         try:
             report = engine.orchestrator.run(
-                pipeline_id, mode=args.mode, limit=args.limit, dry_run=args.dry_run, force=args.force
+                category, language, args.content_types, mode=args.mode, limit=args.limit, dry_run=args.dry_run,
+                force=args.force,
             )
         except BudgetExceededError as exc:
             partial = getattr(exc, "report", None)
@@ -292,10 +384,6 @@ def run_pipelines(engine, args) -> int:
                 print_report(partial)
             print(f"\n[BUDGET HALT] {exc}", file=sys.stderr)
             return EXIT_BUDGET
-        except PipelineError as exc:
-            print(f"\n[ERROR] {exc}", file=sys.stderr)
-            exit_code = EXIT_FAILURES
-            continue
         print_report(report)
         if not report.ok:
             exit_code = EXIT_FAILURES
@@ -323,28 +411,11 @@ def main(argv: list[str] | None = None) -> int:
     _utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.mode == "worker" and (args.dry_run or args.pipeline or args.limit or args.force):
-        parser.error("--mode worker consumes the queue; it cannot be combined with --pipeline/--limit/--dry-run/--force")
-    if args.once and args.mode != "worker":
-        parser.error("--once only applies to --mode worker")
-    if args.seed_temu and args.seed_aliexpress:
-        parser.error("run --seed-temu and --seed-aliexpress separately (they share --category/--keyword/--limit)")
-    if args.seed_temu or args.seed_aliexpress:
-        flag = "--seed-temu" if args.seed_temu else "--seed-aliexpress"
-        if not args.category:
-            parser.error(f"{flag} needs --category NAME (for example: --category gadgets)")
-        if args.dry_run or args.mode:
-            parser.error(f"{flag} makes real API requests and writes products; "
-                         "it cannot be combined with --dry-run or --mode")
-        if args.job and not args.seed_temu:
-            parser.error("--job only applies to --seed-temu (AliExpress searches answer at once)")
-    elif args.verify_instagram and (args.dry_run or args.mode or args.limit or args.force):
-        parser.error("--verify-instagram only reads from the API; it takes --pipeline and nothing else")
-    elif args.category or args.keyword or args.job:
-        parser.error("--category, --keyword and --job only apply to --seed-temu / --seed-aliexpress")
+    validate_args(parser, args)
 
     try:
         from core import bootstrap
+        from core.orchestrator import pipeline_id_for
         from core.resilience import ConfigError, TarshishError
 
         engine = bootstrap(log_level=args.log_level)
@@ -358,55 +429,60 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n[CONFIG ERROR] {exc}\n", file=sys.stderr)
         return EXIT_CONFIG
 
+    pipeline_id = pipeline_id_for(args.category, args.lang) if args.category and args.lang else None
     try:
+        if args.harvest:
+            return run_harvest(engine, args)
+        if args.publish:
+            return run_publish(engine, args)
+        if args.mode == "worker":
+            return run_worker(engine, args)
+
         management, failed = False, False
         if args.verify_instagram:
             management = True
-            failed = not cmd_verify_instagram(engine, args.pipeline)
+            failed = not cmd_verify_instagram(engine, args.category, args.lang)
         if args.sync_config:
             management = True
-            print(f"Synced {engine.registry.sync_from_yaml()} pipeline(s) from "
-                  f"{engine.settings.pipelines_config_path.name} into the database.")
+            counts = engine.registry.sync_from_yaml()
+            print("Synced " + ", ".join(f"{n} {table}" for table, n in counts.items())
+                  + f" from {engine.settings.config_dir} into the database.")
         if args.seed_storefront:
             management = True
             from api.seed import seed_storefront
 
             print(f"Seeded {seed_storefront(engine.db)} demo product(s) into "
                   f"{engine.settings.database_path.name} for the storefront.")
-        if args.seed_temu:
+        if args.seed_temu or args.seed_aliexpress:
             management = True
-            from api.seed import seed_temu
+            from api.seed import seed_aliexpress, seed_temu
 
             limit = args.limit or 10
-            report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
-            print_seed(report, limit)
-            failed = failed or report.provider is None
-        if args.seed_aliexpress:
-            management = True
-            from api.seed import seed_aliexpress
-
-            limit = args.limit or 10
-            report = seed_aliexpress(engine, category=args.category, keyword=args.keyword, limit=limit)
+            if args.seed_temu:
+                report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
+            else:
+                report = seed_aliexpress(engine, category=args.category, keyword=args.keyword, limit=limit)
             print_seed(report, limit)
             failed = failed or report.provider is None
         if args.flush_queue:
             management = True
-            print(f"Flushed {engine.db.flush_queue(args.pipeline)} pending/queued publication(s).")
+            print(f"Flushed {engine.db.flush_queue(pipeline_id)} pending/queued publication(s).")
         if args.retry_failed:
             management = True
-            print(f"Re-queued {engine.db.retry_failed(pipeline_id=args.pipeline)} failed publication(s); "
+            print(f"Re-queued {engine.db.retry_failed(pipeline_id=pipeline_id)} failed publication(s); "
                   "run `python main.py --mode worker` to publish them.")
-        if args.list_pipelines:
+        if args.list_config:
             management = True
-            cmd_list_pipelines(engine)
+            cmd_list_config(engine)
         if args.stats:
             management = True
-            cmd_stats(engine, args.pipeline)
+            cmd_stats(engine, pipeline_id)
         if management:
             return EXIT_FAILURES if failed else EXIT_OK
-        if args.mode == "worker":
-            return run_worker(engine, args)
-        return run_pipelines(engine, args)
+        parser.print_usage(sys.stderr)
+        print("\nChoose a stage: --harvest (Stage 1: fetch products) or --publish (Stage 2: generate and publish), "
+              "--mode worker, or a management flag. See --help.", file=sys.stderr)
+        return EXIT_CONFIG
     except ConfigError as exc:
         print(f"\n[CONFIG ERROR] {exc}\n", file=sys.stderr)
         return EXIT_CONFIG

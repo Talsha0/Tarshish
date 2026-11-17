@@ -1,8 +1,8 @@
 """Publisher plugins and the post-formatting helper they share.
 
 Add a module with one concrete ``core.interfaces.BasePublisher`` subclass (for
-example ``tiktok_pub.py``) and reference it from a pipeline's ``publishers`` /
-``social_pages`` by its module name. No change to ``core/`` is needed.
+example ``tiktok_pub.py``) and link a social account to it: an account of platform ``tiktok`` publishes
+through ``tiktok_pub`` by convention. No change to ``core/`` is needed.
 """
 
 from __future__ import annotations

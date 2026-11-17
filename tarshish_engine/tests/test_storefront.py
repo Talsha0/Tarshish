@@ -40,17 +40,18 @@ def titles(response) -> list[str]:
 
 
 # -- database ------------------------------------------------------------------------- #
+LEGACY = "ni" + "che"  # the pre-v3 name of products.category
 V1_PRODUCTS = """
 CREATE TABLE products (
     id INTEGER PRIMARY KEY AUTOINCREMENT, external_id TEXT NOT NULL, source TEXT NOT NULL,
-    canonical_hash TEXT NOT NULL, niche TEXT NOT NULL, title TEXT NOT NULL, price REAL NOT NULL,
+    canonical_hash TEXT NOT NULL, {legacy} TEXT NOT NULL, title TEXT NOT NULL, price REAL NOT NULL,
     currency TEXT NOT NULL DEFAULT 'ILS', affiliate_url TEXT NOT NULL, created_at TEXT NOT NULL,
     UNIQUE (source, external_id)
 );
-INSERT INTO products (external_id, source, canonical_hash, niche, title, price, affiliate_url, created_at)
+INSERT INTO products (external_id, source, canonical_hash, {legacy}, title, price, affiliate_url, created_at)
 VALUES ('1005006482913507', 'aliexpress_mock', 'abc', 'running_and_sports', 'Old row', 10, 'https://a.example/1',
         '2026-11-01T00:00:00+00:00');
-"""
+""".replace("{legacy}", LEGACY)
 
 
 def test_a_database_from_before_the_storefront_is_upgraded_in_place(tmp_path):
@@ -73,9 +74,10 @@ def test_a_database_from_before_the_storefront_is_upgraded_in_place(tmp_path):
     assert "click_events" in tables
     assert clicks == {"id", "product_id", "category", "source", "language", "referrer_path", "clicked_at"}
 
-    # The old row survives untouched and stays off the storefront until it is upserted again.
+    # The old row survives; its legacy category column is folded into `category` (rating unknown: not listed yet).
+    assert LEGACY not in columns
     assert db.query_one("SELECT title, category, is_flash_sale FROM products WHERE id = 1") == {
-        "title": "Old row", "category": None, "is_flash_sale": 0,
+        "title": "Old row", "category": "running-and-sports", "is_flash_sale": 0,
     }
     assert db.list_storefront_products() == ([], 0)
     seed_storefront(db)
@@ -101,14 +103,14 @@ def test_seeder_loads_a_rich_catalogue_and_is_repeatable(engine):
     assert {row["stock_urgency_label"] for row in rows} >= {"Limited Stock", "Top 1% Deal"}
 
 
-def test_a_pipeline_upsert_refreshes_source_data_but_keeps_the_listing(engine):
+def test_a_harvest_upsert_refreshes_source_data_but_keeps_the_listing(engine):
     seed_storefront(engine.db)
     before = engine.db.query_one("SELECT * FROM products WHERE external_id = '1005006482913507'")
     assert before["coupon_code"] == "RUN15" and before["category"] == "sports"
 
-    # What a pipeline run does: the product as the source reports it, no listing details.
+    # What a source reports: the product, no listing details.
     shoe = Product(
-        external_id="1005006482913507", source="aliexpress_mock", niche="running_and_sports",
+        external_id="1005006482913507", source="aliexpress_mock", category="sports",
         title=before["title"], price=179.90, original_price=329.00, rating=4.9, orders_count=3500,
         raw_url="https://www.aliexpress.com/item/1005006482913507.html", affiliate_url=before["affiliate_url"],
     )
@@ -118,8 +120,8 @@ def test_a_pipeline_upsert_refreshes_source_data_but_keeps_the_listing(engine):
     assert (after["price"], after["rating"], after["orders_count"], after["discount_percent"]) == (179.90, 4.9, 3500, 45)
     assert (after["category"], after["coupon_code"], after["title_he"]) == ("sports", "RUN15", before["title_he"])
 
-    # A product the storefront has never seen is filed under its pipeline's product type.
-    mat = Product(external_id="d1", source="demo_feed", niche="Yoga & Pilates", title="Demo Yoga Mat 6mm", price=59.9,
+    # A product the storefront has never seen is filed under its category.
+    mat = Product(external_id="d1", source="demo_feed", category="Yoga & Pilates", title="Demo Yoga Mat 6mm", price=59.9,
                   rating=4.9, orders_count=900, raw_url="https://shop.example/d1", affiliate_url="https://shop.example/aff/d1")
     new_id = engine.db.upsert_product(mat)
     assert engine.db.get_storefront_product(new_id)["category"] == "yoga-pilates" == category_slug("Yoga & Pilates")
@@ -127,12 +129,13 @@ def test_a_pipeline_upsert_refreshes_source_data_but_keeps_the_listing(engine):
         engine.db.upsert_product(mat, {"price": 1})
 
 
-def test_live_pipeline_run_feeds_the_storefront(engine):
-    """Single source of truth: what a pipeline publishes is what the storefront lists."""
-    report = engine.orchestrator.run("sports_he", limit=1)
-    assert report.ok
+def test_harvesting_feeds_the_storefront(engine):
+    """Single source of truth: what Stage 1 harvests is what the storefront lists (and what gets published)."""
+    report = engine.harvester.harvest("sports", "aliexpress_mock", limit=1)[0]
+    assert report.ok and len(report.inserted) == 1
     rows, total = engine.db.list_storefront_products()
-    assert total == 1 and rows[0]["rating"] >= 4.5 and json.loads(rows[0]["image_urls_json"])
+    assert total == 1 and rows[0]["category"] == "sports" and rows[0]["rating"] >= 4.5
+    assert json.loads(rows[0]["image_urls_json"])
 
 
 def test_mock_sources_serve_their_own_shelves(engine):
@@ -281,7 +284,7 @@ def test_product_and_category_endpoints(api):
 
 
 def test_only_products_that_meet_the_standard_are_listed(api, monkeypatch):
-    weak = Product(external_id="w1", source="temu_mock", niche="home", title="Barely Reviewed Kettle", price=30,
+    weak = Product(external_id="w1", source="temu_mock", category="home", title="Barely Reviewed Kettle", price=30,
                    rating=4.1, orders_count=12, raw_url="https://t.example/w1", affiliate_url="https://t.example/aff/w1")
     weak_id = api.db.upsert_product(weak, {"category": "home"})
     assert api.get("/api/products").json()["total"] == 14

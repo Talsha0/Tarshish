@@ -2,7 +2,10 @@
 
 ``bootstrap()`` is the composition root used by every entrypoint (CLI,
 dashboard, tests). It validates configuration, opens the database, discovers
-plugins and returns a ready-to-use :class:`Engine`.
+plugins and returns a ready-to-use :class:`Engine` with the two decoupled stages:
+
+* ``engine.harvester``     Stage 1 — language-agnostic product harvesting per (category, source)
+* ``engine.orchestrator``  Stage 2 — publishing pipelines per (category, language, content types)
 """
 
 from __future__ import annotations
@@ -17,8 +20,9 @@ __version__ = "0.1.0"
 if TYPE_CHECKING:
     from core.config import Settings
     from core.database import Database
-    from core.pipeline import PipelineOrchestrator
-    from core.registry import PipelineRegistry, PluginRegistry
+    from core.harvester import Harvester
+    from core.orchestrator import PublishingOrchestrator
+    from core.registry import ConfigRegistry, PluginRegistry
     from core.resilience import BudgetGuard
     from core.worker import QueueWorker
 
@@ -30,9 +34,10 @@ class Engine:
     settings: "Settings"
     db: "Database"
     plugins: "PluginRegistry"
-    registry: "PipelineRegistry"
+    registry: "ConfigRegistry"
     budget: "BudgetGuard"
-    orchestrator: "PipelineOrchestrator"
+    harvester: "Harvester"
+    orchestrator: "PublishingOrchestrator"
 
     def create_worker(self) -> "QueueWorker":
         from core.worker import QueueWorker
@@ -50,13 +55,14 @@ def bootstrap(
     """Validate configuration and wire the engine.
 
     Raises :class:`core.resilience.ConfigError` with a descriptive message when
-    environment variables or ``pipelines.yaml`` are invalid — callers should
+    environment variables or a ``config/*.yaml`` seed file are invalid — callers should
     print it and exit instead of continuing in a half-configured state.
     """
     from core.config import default_env_file, load_settings
     from core.database import Database
-    from core.pipeline import PipelineOrchestrator
-    from core.registry import PipelineRegistry, PluginRegistry
+    from core.harvester import Harvester
+    from core.orchestrator import PublishingOrchestrator
+    from core.registry import ConfigRegistry, PluginRegistry
     from core.resilience import BudgetGuard, register_env_secrets, register_secret, setup_logging
 
     if settings is None:
@@ -72,13 +78,15 @@ def bootstrap(
     db.initialize()
 
     plugins = PluginRegistry().discover()
-    registry = PipelineRegistry(settings, db, plugins)
+    registry = ConfigRegistry(settings, db, plugins)
     registry.bootstrap()
 
     budget = BudgetGuard(db.get_monthly_ai_spend, settings.max_monthly_ai_budget_usd)
-    orchestrator = PipelineOrchestrator(settings, db, registry, budget)
+    harvester = Harvester(settings, db, plugins, registry)
+    orchestrator = PublishingOrchestrator(settings, db, registry, budget)
     return Engine(
-        settings=settings, db=db, plugins=plugins, registry=registry, budget=budget, orchestrator=orchestrator
+        settings=settings, db=db, plugins=plugins, registry=registry, budget=budget, harvester=harvester,
+        orchestrator=orchestrator,
     )
 
 

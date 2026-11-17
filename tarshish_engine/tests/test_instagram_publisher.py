@@ -297,14 +297,14 @@ def test_cli_verify_instagram(make_settings, monkeypatch, capsys):
 
     monkeypatch.setenv("INSTAGRAM_ACCESS_TOKEN", TOKEN)
     monkeypatch.setenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", ACCOUNT)
-    assert main.main(["--verify-instagram", "--pipeline", "gadgets_he"]) == 0
+    assert main.main(["--verify-instagram", "--category", "gadgets", "--lang", "he"]) == 0
     out = capsys.readouterr().out
     assert "Connected as @findhub_gadgets | BUSINESS | Permissions: ✓ instagram_business_basic" in out
     assert "Ready for live publishing" in out and TOKEN not in out
     assert {request.method for request in graph.calls} == {"GET"}
 
-    assert main.main(["--verify-instagram", "--pipeline", "sports_he"]) == 1  # no Instagram page there
-    assert "no instagram_pub social page" in capsys.readouterr().out
+    assert main.main(["--verify-instagram", "--category", "sports"]) == 1  # no Instagram account there
+    assert "No Instagram account is configured for sports" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         main.main(["--verify-instagram", "--dry-run"])
 

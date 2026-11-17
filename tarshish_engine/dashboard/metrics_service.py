@@ -110,37 +110,45 @@ class MetricsService:
         return [_with_ratios(row) for row in rows]
 
     def get_metrics_by_pipeline(self) -> list[dict[str, Any]]:
-        """One row per pipeline, including pipelines that have not produced anything yet."""
+        """One row per publishing pipeline ``<category>_<language>``, AI spend from the ledger."""
         rows = self.db.query(
             f"""
             {_LATEST_SNAPSHOT_CTE},
             activity AS (
-                SELECT p.pipeline_id AS pipeline_id, {_ACTIVITY_COLUMNS}
+                SELECT p.pipeline_id AS pipeline_id, MAX(p.category) AS category, MAX(p.language) AS language,
+                       {_ACTIVITY_COLUMNS}
                 FROM publications p LEFT JOIN latest l ON l.publication_id = p.id
                 GROUP BY p.pipeline_id
             ),
             spend AS (
                 SELECT pipeline_id, SUM(generation_cost_usd) AS ai_spend_usd FROM ai_usage GROUP BY pipeline_id
             )
-            SELECT pl.id AS pipeline_id, pl.type AS niche, pl.language AS language, pl.enabled AS enabled,
-                   COALESCE(a.publications, 0) AS publications,
-                   COALESCE(a.published, 0)    AS published,
-                   COALESCE(a.queued, 0)       AS queued,
-                   COALESCE(a.failed, 0)       AS failed,
-                   COALESCE(a.text_count, 0)   AS text_count,
-                   COALESCE(a.video_count, 0)  AS video_count,
-                   COALESCE(a.views, 0)        AS views,
-                   COALESCE(a.clicks, 0)       AS clicks,
-                   COALESCE(a.conversions, 0)  AS conversions,
-                   COALESCE(a.revenue_usd, 0)  AS revenue_usd,
-                   COALESCE(s.ai_spend_usd, 0) AS ai_spend_usd
-            FROM pipelines pl
-            LEFT JOIN activity a ON a.pipeline_id = pl.id
-            LEFT JOIN spend s    ON s.pipeline_id = pl.id
-            ORDER BY revenue_usd DESC, published DESC, pl.id
+            SELECT a.*, COALESCE(s.ai_spend_usd, 0) AS ai_spend_usd
+            FROM activity a LEFT JOIN spend s ON s.pipeline_id = a.pipeline_id
+            ORDER BY revenue_usd DESC, published DESC, a.pipeline_id
             """
         )
         return [_with_ratios(row) for row in rows]
+
+    def get_metrics_by_content_type(self) -> list[dict[str, Any]]:
+        """One row per content profile (``instagram_post``, ``instagram_story``…) and the models that wrote it."""
+        rows = self.db.query(
+            f"""
+            {_LATEST_SNAPSHOT_CTE}
+            SELECT COALESCE(p.content_format, 'legacy') AS content_format,
+                   GROUP_CONCAT(DISTINCT p.model_used) AS models,
+                   {_ACTIVITY_COLUMNS},
+                   COALESCE(SUM(p.generation_cost_usd), 0) AS ai_spend_usd
+            FROM publications p LEFT JOIN latest l ON l.publication_id = p.id
+            GROUP BY COALESCE(p.content_format, 'legacy')
+            ORDER BY published DESC, content_format
+            """
+        )
+        return [_with_ratios(row) for row in rows]
+
+    def get_product_inventory(self) -> list[dict[str, Any]]:
+        """Harvested products per category and source (Stage 1 output)."""
+        return self.db.count_products()
 
     # -- storefront click-throughs ----------------------------------------------- #
     # ``click_events`` holds one row per confirmed outbound click on the public storefront,

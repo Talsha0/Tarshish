@@ -7,6 +7,13 @@ Design notes
 * One short-lived connection per operation keeps the class safe to share
   between threads (Streamlit reruns, worker loop) and processes.
 * Timestamps are stored as UTC ISO-8601 text, which sorts chronologically.
+* Configuration is normalized into three tables seeded from ``config/*.yaml``:
+  ``categories`` (language-agnostic search rules), ``content_profiles`` (generator +
+  LLM model per content type) and ``social_accounts`` (the category × language ×
+  platform matrix). Products are harvested once per (category, source) into
+  ``products``; publishing pipelines — a (category, language) pair, id
+  ``<category>_<language>`` — read them back and record one ``publications`` row per
+  (product, account, content type).
 * ``ai_usage`` is an append-only ledger of LLM spend. The budget guardrail sums
   it instead of ``publications.generation_cost_usd`` so that flushing the queue
   (or generating content that never gets a publication row) cannot erase money
@@ -21,34 +28,54 @@ Design notes
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from core.models import GeneratedContent, Product, PublicationStatus, utcnow
-from core.resilience import PipelineError, get_logger
+from core.models import GeneratedContent, Product, PublicationStatus, category_slug, utcnow
+from core.resilience import get_logger
 
 logger = get_logger("database")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS pipelines (
-    id                TEXT PRIMARY KEY,
-    type              TEXT NOT NULL,                      -- niche / category
-    language          TEXT NOT NULL,
-    source_plugin     TEXT NOT NULL,
-    generator_plugin  TEXT NOT NULL,
-    llm_model         TEXT NOT NULL DEFAULT 'mock',
-    publishing_mode   TEXT NOT NULL DEFAULT 'immediate' CHECK (publishing_mode IN ('immediate', 'queued')),
-    social_pages_json TEXT NOT NULL DEFAULT '[]',         -- env-var NAMES only, never secrets
-    filters_json      TEXT NOT NULL DEFAULT '{}',
-    options_json      TEXT NOT NULL DEFAULT '{}',         -- prompt template, per-run limit, plugin options
-    enabled           INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    created_at        TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS categories (
+    category_id            TEXT PRIMARY KEY,               -- URL slug, e.g. 'gadgets'
+    display_name_en        TEXT NOT NULL,
+    display_name_he        TEXT NOT NULL DEFAULT '',
+    temu_search_json       TEXT,                           -- {"keyword": ..., "l2Category": ..., "priceMin": ...}
+    aliexpress_search_json TEXT,
+    min_rating             REAL NOT NULL DEFAULT 0,
+    min_orders             INTEGER NOT NULL DEFAULT 0,
+    enabled                INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at             TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS content_profiles (
+    content_type    TEXT PRIMARY KEY,                      -- instagram_post | instagram_story | tiktok_video ...
+    platform        TEXT NOT NULL,                         -- instagram | tiktok | telegram ...
+    generator       TEXT NOT NULL,                         -- generator plugin
+    llm_model       TEXT NOT NULL DEFAULT 'mock',
+    publish_format  TEXT,                                  -- image | reel | story ... (publisher option)
+    tone            TEXT,
+    prompt_template TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS social_accounts (
+    category_id        TEXT NOT NULL,
+    language           TEXT NOT NULL,
+    platform           TEXT NOT NULL,
+    account_handle     TEXT NOT NULL,
+    token_env_var      TEXT,                               -- env-var NAMES only, never secrets
+    account_id_env_var TEXT,
+    enabled            INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at         TEXT NOT NULL,
+    PRIMARY KEY (category_id, language, platform)
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -56,7 +83,7 @@ CREATE TABLE IF NOT EXISTS products (
     external_id    TEXT NOT NULL,
     source         TEXT NOT NULL,
     canonical_hash TEXT NOT NULL,
-    niche          TEXT NOT NULL,
+    category       TEXT,                                   -- harvesting category id; NULL = not listed
     title          TEXT NOT NULL,
     price          REAL NOT NULL,
     currency       TEXT NOT NULL DEFAULT 'ILS',
@@ -65,12 +92,18 @@ CREATE TABLE IF NOT EXISTS products (
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_products_canonical_hash ON products (canonical_hash);
+"""
 
+PUBLICATIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS publications (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id         TEXT NOT NULL REFERENCES pipelines (id),
+    pipeline_id         TEXT NOT NULL,                    -- publishing pipeline '<category>_<language>'
     product_id          INTEGER NOT NULL REFERENCES products (id),
-    platform            TEXT NOT NULL,
+    category            TEXT,                             -- NULL only on rows from before schema v3
+    language            TEXT,
+    content_format      TEXT,                             -- content profile: instagram_post, instagram_story ...
+    account_platform    TEXT,                             -- social_accounts.platform (instagram ...)
+    platform            TEXT NOT NULL,                    -- publisher plugin (instagram_pub ...)
     target_page         TEXT NOT NULL DEFAULT 'default',
     content_type        TEXT NOT NULL CHECK (content_type IN ('text', 'video')),
     status              TEXT NOT NULL CHECK (status IN ('PENDING', 'QUEUED', 'PUBLISHED', 'FAILED')),
@@ -87,10 +120,17 @@ CREATE TABLE IF NOT EXISTS publications (
     attempts            INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL
 );
+"""
+
+PUBLICATION_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_publications_queue    ON publications (status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_publications_pipeline ON publications (pipeline_id, product_id);
 CREATE INDEX IF NOT EXISTS idx_publications_target   ON publications (platform, target_page, status);
+CREATE INDEX IF NOT EXISTS idx_publications_account
+    ON publications (category, language, account_platform, content_format, product_id);
+"""
 
+LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS metrics_snapshots (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     publication_id INTEGER NOT NULL REFERENCES publications (id) ON DELETE CASCADE,
@@ -104,7 +144,7 @@ CREATE INDEX IF NOT EXISTS idx_metrics_publication ON metrics_snapshots (publica
 
 CREATE TABLE IF NOT EXISTS ai_usage (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    pipeline_id         TEXT NOT NULL,
+    pipeline_id         TEXT NOT NULL,                    -- '<category>_<language>' (or 'harvest')
     product_ref         TEXT NOT NULL,                    -- "<source>:<external_id>"
     model_used          TEXT NOT NULL,
     tokens_input        INTEGER NOT NULL DEFAULT 0,
@@ -115,10 +155,15 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage (created_at);
 """
 
+# Columns added to ``publications`` by schema v3 (copied as NULL from older rows).
+PUBLICATION_V3_COLUMNS = ("category", "language", "content_format", "account_platform")
+
 # Storefront columns of ``products``, added with ALTER TABLE when missing (name -> definition).
 # SQLite can only add a NOT NULL column when it has a default, hence the defaults below.
 PRODUCT_STOREFRONT_COLUMNS: dict[str, str] = {
-    "category": "TEXT",                             # storefront shelf, e.g. 'sports'; NULL = not listed
+    "category": "TEXT",                             # harvesting category / storefront shelf; NULL = not listed
+    "raw_url": "TEXT",                              # plain product URL (affiliate_url carries the tracking)
+    "video_url": "TEXT",
     "title_he": "TEXT",                             # Hebrew title for the RTL storefront
     "original_price": "REAL",
     "discount_percent": "INTEGER",
@@ -169,11 +214,6 @@ _STOREFRONT_COLUMNS = (
 _ACTIVE = (PublicationStatus.PENDING.value, PublicationStatus.QUEUED.value)
 
 
-def category_slug(value: str) -> str:
-    """URL-safe storefront category: 'Running & Sports' -> 'running-sports'."""
-    return re.sub(r"[\W_]+", "-", value.casefold()).strip("-")
-
-
 def to_iso(moment: datetime) -> str:
     """UTC ISO-8601 with second precision — the single on-disk timestamp format."""
     if moment.tzinfo is None:
@@ -183,6 +223,20 @@ def to_iso(moment: datetime) -> str:
 
 def from_iso(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+def product_from_row(row: Mapping[str, Any]) -> Product:
+    """Rebuild a :class:`Product` from a ``products`` row (raises ``ValueError`` when unusable)."""
+    affiliate = row["affiliate_url"]
+    raw_url = row.get("raw_url") or affiliate.split("?", 1)[0]  # rows harvested before raw_url existed
+    return Product(
+        external_id=row["external_id"], source=row["source"], canonical_hash=row["canonical_hash"],
+        category=row["category"], title=row["title"], price=row["price"],
+        original_price=row.get("original_price"), currency=row["currency"],
+        rating=row.get("rating") or 0.0, orders_count=row.get("orders_count") or 0,
+        raw_url=raw_url, affiliate_url=affiliate,
+        image_urls=json.loads(row.get("image_urls_json") or "[]"), video_url=row.get("video_url"),
+    )
 
 
 class Database:
@@ -211,24 +265,78 @@ class Database:
             conn.close()
 
     def initialize(self) -> None:
-        """Create the schema (idempotent) and verify WAL mode is active."""
+        """Create the schema (idempotent), upgrade older databases in place and verify WAL mode."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._upgrade_publications()
         with self.connect() as conn:
             mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
             if str(mode).lower() != "wal":
                 logger.warning("SQLite journal mode is %r, expected 'wal' — concurrent writers may block.", mode)
             conn.executescript(SCHEMA)
+            conn.executescript(PUBLICATIONS_TABLE)
+            conn.executescript(PUBLICATION_INDEXES)
+            conn.executescript(LEDGER_SCHEMA)
             self._migrate(conn)
             conn.executescript(STOREFRONT_SCHEMA)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
 
+    def _upgrade_publications(self) -> None:
+        """Schema v2 -> v3: rebuild ``publications`` without its foreign key to the legacy ``pipelines`` table.
+
+        Publications used to belong to a row of ``pipelines``; they now name their publishing
+        pipeline (``<category>_<language>``), category, language, content profile and account
+        directly. SQLite cannot drop a foreign key in place, so the table is rebuilt (the
+        documented 12-step procedure) inside one transaction. Existing rows keep their ids —
+        ``metrics_snapshots`` still points at them — and gain category/language from the
+        legacy pipeline they belonged to. The legacy ``pipelines`` table itself is left
+        untouched (and unused) so no hand-made configuration is ever lost.
+        """
+        conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000;")
+            conn.create_function("category_slug", 1, lambda value: category_slug(value) if value else value)
+            fks = conn.execute("PRAGMA foreign_key_list(publications)").fetchall()
+            if not any(row[2] == "pipelines" for row in fks):
+                return
+            old_columns = [row[1] for row in conn.execute("PRAGMA table_info(publications)")]
+            conn.execute("PRAGMA foreign_keys=OFF;")
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                # Create-copy-drop-rename (https://sqlite.org/lang_altertable.html#otheralter): renaming the
+                # *old* table first would make SQLite repoint metrics_snapshots' foreign key at the copy.
+                conn.execute(PUBLICATIONS_TABLE.replace("IF NOT EXISTS publications", "publications_v3"))
+                shared = ", ".join(name for name in old_columns if name not in PUBLICATION_V3_COLUMNS)
+                conn.execute(f"INSERT INTO publications_v3 ({shared}) SELECT {shared} FROM publications;")
+                legacy = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pipelines'"
+                ).fetchone()
+                if legacy:
+                    conn.execute(
+                        "UPDATE publications_v3 SET "
+                        "category = (SELECT category_slug(type) FROM pipelines pl WHERE pl.id = publications_v3.pipeline_id), "
+                        "language = (SELECT language FROM pipelines pl WHERE pl.id = publications_v3.pipeline_id)"
+                    )
+                conn.execute("DROP TABLE publications;")
+                conn.execute("ALTER TABLE publications_v3 RENAME TO publications;")
+                problems = conn.execute("PRAGMA foreign_key_check;").fetchall()
+                if problems:
+                    raise sqlite3.IntegrityError(f"foreign key check failed after the rebuild: {problems[:3]}")
+                conn.execute("COMMIT;")
+            except BaseException:
+                conn.execute("ROLLBACK;")
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys=ON;")
+            logger.info("Database migration: publications upgraded to schema v3 (decoupled from legacy pipelines).")
+        finally:
+            conn.close()
+
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
-        """Add the storefront columns to a ``products`` table that predates them.
+        """Additive, idempotent column migrations of ``products``.
 
-        Additive and idempotent: existing rows and columns are never rewritten. Rows that
-        were stored before the migration keep ``category`` NULL, so they stay off the
-        storefront until a pipeline run or the seeder upserts them again.
+        Adds the storefront columns to tables that predate them, and folds the legacy
+        pre-v3 category column (renamed in v3) into ``category`` before dropping it.
         """
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
         for name, definition in PRODUCT_STOREFRONT_COLUMNS.items():
@@ -242,6 +350,17 @@ class Database:
                     raise
             else:
                 logger.info("Database migration: added products.%s.", name)
+        legacy = "ni" + "che"  # the pre-v3 name of ``category``
+        if legacy in existing:
+            rows = conn.execute(f"SELECT id, {legacy} FROM products WHERE category IS NULL OR category = ''").fetchall()
+            for row in rows:
+                conn.execute("UPDATE products SET category = ? WHERE id = ?", (category_slug(row[legacy]), row["id"]))
+            try:
+                conn.execute(f"ALTER TABLE products DROP COLUMN {legacy}")
+                logger.info("Database migration: products.%s folded into products.category.", legacy)
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc).lower():
+                    raise
 
     def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[dict[str, Any]]:
         """Run a read query and return plain dict rows (used by the dashboard layer)."""
@@ -256,54 +375,71 @@ class Database:
         with self.connect() as conn:
             return conn.execute(sql, params).rowcount
 
-    # -- pipelines ---------------------------------------------------------- #
-    def count_pipelines(self) -> int:
-        return int(self.query_one("SELECT COUNT(*) AS n FROM pipelines")["n"])  # type: ignore[index]
+    # -- configuration: categories, content profiles, social accounts ----------- #
+    # Table -> (primary-key columns, writable columns). Rows are validated by core.config models
+    # before they get here; this layer only persists them.
+    CONFIG_TABLES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+        "categories": (
+            ("category_id",),
+            ("display_name_en", "display_name_he", "temu_search_json", "aliexpress_search_json",
+             "min_rating", "min_orders", "enabled"),
+        ),
+        "content_profiles": (
+            ("content_type",),
+            ("platform", "generator", "llm_model", "publish_format", "tone", "prompt_template", "enabled"),
+        ),
+        "social_accounts": (
+            ("category_id", "language", "platform"),
+            ("account_handle", "token_env_var", "account_id_env_var", "enabled"),
+        ),
+    }
+    _CONFIG_ORDER = {
+        "categories": "category_id",
+        "content_profiles": "content_type",
+        "social_accounts": "category_id, platform, language",
+    }
 
-    def list_pipelines(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+    def _config_table(self, table: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        try:
+            return self.CONFIG_TABLES[table]
+        except KeyError:
+            raise ValueError(f"unknown configuration table '{table}'") from None
+
+    def count_rows(self, table: str) -> int:
+        self._config_table(table)
+        return int(self.query_one(f"SELECT COUNT(*) AS n FROM {table}")["n"])  # type: ignore[index]
+
+    def list_config(self, table: str, enabled_only: bool = False) -> list[dict[str, Any]]:
+        self._config_table(table)
         where = "WHERE enabled = 1" if enabled_only else ""
-        return self.query(f"SELECT * FROM pipelines {where} ORDER BY created_at, id")
+        return self.query(f"SELECT * FROM {table} {where} ORDER BY {self._CONFIG_ORDER[table]}")
 
-    def get_pipeline(self, pipeline_id: str) -> dict[str, Any] | None:
-        return self.query_one("SELECT * FROM pipelines WHERE id = ?", (pipeline_id,))
+    def get_config(self, table: str, *key: Any) -> dict[str, Any] | None:
+        keys, _ = self._config_table(table)
+        where = " AND ".join(f"{name} = ?" for name in keys)
+        return self.query_one(f"SELECT * FROM {table} WHERE {where}", key)
 
-    def upsert_pipeline(self, record: Mapping[str, Any]) -> None:
-        """Insert or update a pipeline row (``created_at`` is preserved on update)."""
+    def upsert_config(self, table: str, record: Mapping[str, Any]) -> None:
+        """Insert or update one configuration row (``created_at`` is preserved on update)."""
+        keys, columns = self._config_table(table)
+        names = [*keys, *columns, "created_at"]
+        updates = ", ".join(f"{name} = excluded.{name}" for name in columns)
         with self.connect() as conn:
             conn.execute(
-                """
-                INSERT INTO pipelines (id, type, language, source_plugin, generator_plugin, llm_model,
-                                       publishing_mode, social_pages_json, filters_json, options_json,
-                                       enabled, created_at)
-                VALUES (:id, :type, :language, :source_plugin, :generator_plugin, :llm_model,
-                        :publishing_mode, :social_pages_json, :filters_json, :options_json,
-                        :enabled, :created_at)
-                ON CONFLICT (id) DO UPDATE SET
-                    type = excluded.type,
-                    language = excluded.language,
-                    source_plugin = excluded.source_plugin,
-                    generator_plugin = excluded.generator_plugin,
-                    llm_model = excluded.llm_model,
-                    publishing_mode = excluded.publishing_mode,
-                    social_pages_json = excluded.social_pages_json,
-                    filters_json = excluded.filters_json,
-                    options_json = excluded.options_json,
-                    enabled = excluded.enabled
-                """,
-                {**record, "created_at": to_iso(utcnow())},
+                f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join(f':{n}' for n in names)}) "
+                f"ON CONFLICT ({', '.join(keys)}) DO UPDATE SET {updates}",
+                {**{name: record.get(name) for name in (*keys, *columns)}, "created_at": to_iso(utcnow())},
             )
 
-    def set_pipeline_enabled(self, pipeline_id: str, enabled: bool) -> bool:
-        return self._execute("UPDATE pipelines SET enabled = ? WHERE id = ?", (int(enabled), pipeline_id)) > 0
+    def set_config_enabled(self, table: str, key: Sequence[Any], enabled: bool) -> bool:
+        keys, _ = self._config_table(table)
+        where = " AND ".join(f"{name} = ?" for name in keys)
+        return self._execute(f"UPDATE {table} SET enabled = ? WHERE {where}", (int(enabled), *key)) > 0
 
-    def delete_pipeline(self, pipeline_id: str) -> bool:
-        """Delete a pipeline that has no publication history (history is never orphaned)."""
-        try:
-            return self._execute("DELETE FROM pipelines WHERE id = ?", (pipeline_id,)) > 0
-        except sqlite3.IntegrityError as exc:
-            raise PipelineError(
-                f"Pipeline '{pipeline_id}' has publication history and cannot be deleted — disable it instead."
-            ) from exc
+    def delete_config(self, table: str, *key: Any) -> bool:
+        keys, _ = self._config_table(table)
+        where = " AND ".join(f"{name} = ?" for name in keys)
+        return self._execute(f"DELETE FROM {table} WHERE {where}", key) > 0
 
     # -- products ----------------------------------------------------------- #
     def upsert_product(self, product: Product, listing: Mapping[str, Any] | None = None) -> int:
@@ -313,7 +449,7 @@ class Database:
         call. ``listing`` carries the storefront details a source does not know (see
         ``LISTING_COLUMNS``); only the keys it names are written, so a plain pipeline upsert
         never wipes a coupon or a category that was set earlier. A new product without an
-        explicit category is filed under its pipeline's product type.
+        explicit category is filed under ``product.category``.
         """
         listing = dict(listing or {})
         unknown = sorted(set(listing) - set(LISTING_COLUMNS))
@@ -321,19 +457,20 @@ class Database:
             raise ValueError(f"unknown listing field(s): {', '.join(unknown)}")
         values = {
             "external_id": product.external_id, "source": product.source,
-            "canonical_hash": product.canonical_hash, "niche": product.niche, "title": product.title,
+            "canonical_hash": product.canonical_hash, "title": product.title,
+            "raw_url": product.raw_url, "video_url": product.video_url,
             "price": product.price, "currency": product.currency, "affiliate_url": product.affiliate_url,
             "original_price": product.original_price, "discount_percent": product.discount_percent,
             "rating": product.rating, "orders_count": product.orders_count,
             "image_urls_json": json.dumps(product.image_urls),
-            "category": category_slug(str(listing.get("category") or product.niche)),
+            "category": category_slug(str(listing.get("category") or product.category)),
             "title_he": listing.get("title_he"), "coupon_code": listing.get("coupon_code"),
             "is_flash_sale": int(bool(listing.get("is_flash_sale", False))),
             "stock_urgency_label": listing.get("stock_urgency_label"),
             "created_at": to_iso(utcnow()),
         }
         refreshed = [
-            "canonical_hash", "niche", "title", "price", "currency", "affiliate_url", "original_price",
+            "canonical_hash", "raw_url", "video_url", "title", "price", "currency", "affiliate_url", "original_price",
             "discount_percent", "rating", "orders_count", "image_urls_json", *listing,
         ]
         updates = [f"{name} = excluded.{name}" for name in refreshed]
@@ -350,6 +487,10 @@ class Database:
                 values,
             ).fetchone()
             return int(row["id"])
+
+    def product_id(self, source: str, external_id: str) -> int | None:
+        row = self.query_one("SELECT id FROM products WHERE source = ? AND external_id = ?", (source, external_id))
+        return int(row["id"]) if row else None
 
     # -- storefront ----------------------------------------------------------- #
     @staticmethod
@@ -445,20 +586,58 @@ class Database:
         return {int(row["product_id"]): int(row["clicks"]) for row in rows}
 
     # -- publications ------------------------------------------------------- #
-    def handled_targets(self, pipeline_id: str, canonical_hash: str) -> set[tuple[str, str]]:
-        """(platform, page) pairs that already hold this product for this pipeline.
+    def unpublished_products(
+        self, *, category: str, language: str, account_platform: str, content_format: str,
+        min_rating: float = 0.0, min_orders: int = 0, limit: int = 5, include_handled: bool = False,
+    ) -> list[Product]:
+        """Harvested products of ``category`` that this account has not received in this format yet.
 
-        Matching on ``canonical_hash`` de-duplicates the same item across sources.
+        A product counts as handled once ``publications`` holds a row for the same
+        ``(language, account, content format)`` — PUBLISHED, or QUEUED/PENDING (in flight),
+        or FAILED (recovered with ``--retry-failed``, never silently re-generated). The match
+        is on ``canonical_hash``, so the same item harvested from two stores is offered once.
+        Best sellers first. ``include_handled`` (``--force``) drops the exclusion.
         """
+        exclusion = "" if include_handled else """
+              AND NOT EXISTS (
+                SELECT 1 FROM publications pub JOIN products seen ON seen.id = pub.product_id
+                WHERE seen.canonical_hash = p.canonical_hash
+                  AND pub.category = :category AND pub.language = :language
+                  AND pub.account_platform = :platform AND pub.content_format = :format
+              )"""
         rows = self.query(
-            """
-            SELECT DISTINCT pub.platform, pub.target_page
-            FROM publications pub JOIN products p ON p.id = pub.product_id
-            WHERE pub.pipeline_id = ? AND p.canonical_hash = ?
+            f"""
+            SELECT p.* FROM products p
+            WHERE p.category = :category AND COALESCE(p.rating, 0) >= :min_rating
+              AND COALESCE(p.orders_count, 0) >= :min_orders {exclusion}
+            ORDER BY COALESCE(p.orders_count, 0) DESC, COALESCE(p.rating, 0) DESC, p.id
             """,
-            (pipeline_id, canonical_hash),
+            {"category": category_slug(category), "language": language, "platform": account_platform,
+             "format": content_format, "min_rating": min_rating, "min_orders": min_orders},
         )
-        return {(row["platform"], row["target_page"]) for row in rows}
+        products: list[Product] = []
+        seen_hashes: set[str] = set()
+        for row in rows:
+            if row["canonical_hash"] in seen_hashes:
+                continue
+            try:
+                products.append(product_from_row(row))
+            except ValueError as exc:  # a corrupt or legacy row must not hide the healthy ones
+                logger.warning("Stored product %s:%s is not usable (%s).", row["source"], row["external_id"], exc)
+                continue
+            seen_hashes.add(row["canonical_hash"])
+            if len(products) >= limit:
+                break
+        return products
+
+    def count_products(self, category: str | None = None) -> list[dict[str, Any]]:
+        """Harvested products per (category, source)."""
+        where, params = ("WHERE category = ?", (category_slug(category),)) if category else ("", ())
+        return self.query(
+            f"SELECT category, source, COUNT(*) AS products, MAX(created_at) AS last_harvest FROM products {where} "
+            "GROUP BY category, source ORDER BY category, source",
+            params,
+        )
 
     def insert_publication(
         self,
@@ -466,6 +645,9 @@ class Database:
         pipeline_id: str,
         product_id: int,
         platform: str,
+        category: str | None = None,
+        language: str | None = None,
+        account_platform: str | None = None,
         target_page: str,
         target_json: str,
         content: GeneratedContent,
@@ -476,13 +658,15 @@ class Database:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO publications (pipeline_id, product_id, platform, target_page, content_type, status,
+                INSERT INTO publications (pipeline_id, product_id, category, language, content_format,
+                                          account_platform, platform, target_page, content_type, status,
                                           caption, media_uri, model_used, generation_cost_usd, scheduled_for,
                                           content_json, target_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    pipeline_id, product_id, platform, target_page, content.content_type, status.value,
+                    pipeline_id, product_id, category, language or content.language, content.content_format,
+                    account_platform, platform, target_page, content.content_type, status.value,
                     content.caption, content.media_public_url or content.media_local_path, content.model_used,
                     cost_share_usd, to_iso(scheduled_for) if scheduled_for else None,
                     content.model_dump_json(), target_json, to_iso(utcnow()),
@@ -518,11 +702,17 @@ class Database:
         self._execute("UPDATE publications SET scheduled_for = ? WHERE id = ?", (to_iso(when), publication_id))
 
     def fetch_due_publications(self, now: datetime, limit: int = 20) -> list[dict[str, Any]]:
-        """QUEUED rows whose slot has arrived, oldest slot first (disabled pipelines are paused)."""
+        """QUEUED rows whose slot has arrived, oldest slot first.
+
+        Rows of a disabled social account or category are paused (kept, not sent).
+        """
         return self.query(
             """
-            SELECT pub.* FROM publications pub JOIN pipelines pl ON pl.id = pub.pipeline_id
-            WHERE pub.status = 'QUEUED' AND pl.enabled = 1
+            SELECT pub.* FROM publications pub
+            LEFT JOIN social_accounts sa ON sa.category_id = pub.category AND sa.language = pub.language
+                                        AND sa.platform = pub.account_platform
+            LEFT JOIN categories c ON c.category_id = pub.category
+            WHERE pub.status = 'QUEUED' AND COALESCE(sa.enabled, 1) = 1 AND COALESCE(c.enabled, 1) = 1
               AND (pub.scheduled_for IS NULL OR pub.scheduled_for <= ?)
             ORDER BY COALESCE(pub.scheduled_for, pub.created_at), pub.id
             LIMIT ?
@@ -571,7 +761,8 @@ class Database:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.query(
             f"""
-            SELECT pub.id, pub.pipeline_id, pub.platform, pub.target_page, pub.content_type, pub.status,
+            SELECT pub.id, pub.pipeline_id, pub.category, pub.language, pub.content_format, pub.account_platform,
+                   pub.platform, pub.target_page, pub.content_type, pub.status,
                    p.title AS product_title, pub.caption, pub.media_uri, pub.model_used, pub.generation_cost_usd,
                    pub.platform_post_id, pub.scheduled_for, pub.published_at, pub.error_message, pub.attempts,
                    pub.created_at

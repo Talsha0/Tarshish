@@ -35,19 +35,18 @@ Environment variables (see ``.env.example``)::
     TEMU_JOB_TIMEOUT               seconds to wait for a background search, default 300
     TEMU_CURRENCY                  currency of prices when the API does not say, default USD
 
-Per-pipeline search terms live in the pipeline's ``options``::
+Search terms are a category's ``temu_search`` rules (``config/categories.yaml`` ➔
+``categories.temu_search_json``), handed over by the harvester as ``options.search_config``::
 
-    options:
-      search_config:
-        keyword: "tech gadgets"        # default: the pipeline's category
-        l1Category: "..."              # optional filters, passed to the providers that support them
-        l2Category: "..."
-        priceMin: 1
-        priceMax: 100
-        skip_published: false          # true: drop (not just rank last) products this pipeline already handled
+    temu_search:
+      keyword: "smart tech gadgets"  # default: the category id
+      l1Category: "..."              # optional filters, passed to the providers that support them
+      l2Category: "..."
+      priceMin: 1
+      priceMax: 100
 
 A ``--dry-run`` never spends quota: it previews the Temu products already stored
-in SQLite for the category (``python main.py --seed-temu`` puts them there), or
+in SQLite for the category (``python main.py --harvest`` puts them there), or
 mock stand-ins when nothing is stored yet.
 """
 
@@ -197,7 +196,7 @@ class TemuSettings(BaseModel):
 
 
 class TemuSearch(BaseModel):
-    """``options.search_config`` of a pipeline (keys as the original API spells them)."""
+    """A category's Temu search rules, ``options.search_config`` (keys as the original API spells them)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, str_strip_whitespace=True)
 
@@ -306,8 +305,7 @@ class TemuRapidApiSource(BaseSource):
         try:
             return TemuSearch.model_validate(raw)
         except ValidationError as exc:
-            pipeline = self.context.pipeline_id or "?"
-            raise config_error(f"Pipeline '{pipeline}': invalid options.search_config", exc) from None
+            raise config_error("Invalid temu_search rules of the category", exc) from None
 
     # -- contract ------------------------------------------------------------------- #
     def fetch_products(self, category: str, min_rating: float, min_orders: int, limit: int) -> list[Product]:
