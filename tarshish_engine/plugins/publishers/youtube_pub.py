@@ -252,6 +252,7 @@ class YouTubeShortsPublisher(BasePublisher):
     required_credentials = ("token", "client_id", "client_secret")
     default_env_vars = {"token": _REFRESH_ENV, "client_id": _CLIENT_ID_ENV, "client_secret": _CLIENT_SECRET_ENV}
     account_credential = "channel_id"   # optional: verification checks the token belongs to this channel
+    inline_credentials = {"client_id": "client_id", "channel_id": "channel_id"}
     _http_factory: Callable[[], Any] | None = None  # test hook: returns an httplib2.Http-like object
     chunk_size: int = CHUNK_SIZE
 

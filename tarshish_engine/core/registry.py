@@ -280,6 +280,8 @@ class ConfigRegistry:
             if self.plugins.has("publisher", account.publisher):
                 credential = self.plugins.get("publisher", account.publisher).account_credential
             page[f"{credential}_env_var"] = account.account_id_env_var
+        for key, value in account.platform_metadata.items():
+            page.setdefault(key, value)  # non-secret identifiers, handed to the publisher as options
         if profile is not None and profile.publish_format:
             page["content_type"] = profile.publish_format
         return SocialPage.model_validate(page)
@@ -295,12 +297,23 @@ class ConfigRegistry:
         except PluginError as exc:
             return None, str(exc)
 
-        env_names = {**publisher_cls.default_env_vars, **page.env_refs()}
+        explicit = page.env_refs()
+        env_names = {**publisher_cls.default_env_vars, **explicit}
+        options = page.options()
+        # Identifiers given inline in the account's platform metadata (never secrets).
+        inline = {
+            credential: str(options[key]).strip()
+            for key, credential in publisher_cls.inline_credentials.items()
+            if str(options.get(key) or "").strip()
+        }
         credentials: dict[str, SecretStr] = {}
         missing: list[str] = []
-        for name in dict.fromkeys([*publisher_cls.required_credentials, *sorted(env_names)]):
+        for name in dict.fromkeys([*publisher_cls.required_credentials, *sorted(env_names), *sorted(inline)]):
             env_name = env_names.get(name)
             value = os.getenv(env_name, "").strip() if env_name else ""
+            # An env var the account names explicitly wins; otherwise the inline identifier beats a default.
+            if name in inline and not (name in explicit and value):
+                value = inline[name]
             if value:
                 credentials[name] = SecretStr(value)
                 if is_sensitive_name(name) or is_sensitive_name(env_name or ""):

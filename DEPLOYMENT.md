@@ -121,12 +121,42 @@ Environment variables:
 
 | Variable | Required | Value |
 |---|---|---|
-| `API_ORIGIN` | **yes** | the API project's URL from step 2, e.g. `https://findhub-api.vercel.app` (no trailing slash). Used at **build** time for the `/api` proxy — redeploy after changing it. A build without it fails on purpose. |
+| `BACKEND_API_URL` | **yes** | the backend's URL, e.g. `https://findhub-api.vercel.app` from step 2, or the long-running backend of step 3b (no trailing slash). Used at **build** time for the `/api` and `/api/backend` proxy — redeploy after changing it. A build without it fails on purpose. `API_ORIGIN`, its older name, still works. |
+| `ADMIN_API_SECRET` | for `/admin` | the same value as on the backend (step 3b). Server-only; the admin portal stays closed without it. |
 | `NEXT_PUBLIC_SITE_URL` | once you have a domain | e.g. `https://findhub.co.il` — canonical links and social previews. Defaults to the Vercel production domain. |
 | `NEXT_PUBLIC_ILS_PER_USD` | no | shekels per dollar for the English price hint (default 3.5) |
 
 Deploy and open the site: `/` redirects to `/he`. Add your own domain under **Settings → Domains**,
 then set `NEXT_PUBLIC_SITE_URL` to it, update `STOREFRONT_ORIGINS` on the API project, and redeploy both.
+
+---
+
+## 3b. The web admin portal (`/admin`)
+
+The storefront project also serves the admin control center at `https://<your domain>/admin`: every
+`python main.py` operation (harvest, publish, `--verify-*`, seeding, queue management, configuration)
+with live console output. Its route handler adds `X-Admin-Key` on the server and calls
+`BACKEND_API_URL/api/admin/*` (`tarshish_engine/storefront_api/admin.py`).
+
+Harvests and publishing run as background jobs, which a serverless function cannot keep alive. For the
+admin portal, therefore, run the same FastAPI app as a long-running process on a server that has the
+engine's credentials, expose it over HTTPS (Cloudflare Tunnel or a reverse proxy), and point
+`BACKEND_API_URL` at it:
+
+```bash
+# tarshish_engine/.env on the server: ADMIN_API_SECRET, ALLOWED_ORIGINS=https://yourdomain.com,
+# DATABASE_URL and every engine credential (RapidAPI keys, ANTHROPIC_API_KEY, page tokens…)
+python -m uvicorn storefront_api.server:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Pointed at the serverless API of step 2 instead, the portal still edits categories, accounts and models,
+but refuses to start jobs and says why. Step-by-step: *Vercel Deployment & Web Admin Setup* in
+[`setup_roadmap.html`](setup_roadmap.html).
+
+| Variable | Where | Value |
+|---|---|---|
+| `ADMIN_API_SECRET` | backend **and** storefront | 16+ random characters; the admin login password. The admin API answers 503 while it is unset or the example value. |
+| `ALLOWED_ORIGINS` | backend | browser origins allowed to call the API directly (the portal itself proxies, so this is only for other front ends) |
 
 ---
 

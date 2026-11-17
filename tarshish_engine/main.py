@@ -25,6 +25,7 @@ Management
     python main.py --verify-instagram [--category gadgets --lang he]   # read-only Instagram connection check
     python main.py --verify-youtube [--category gadgets --lang he]     # OAuth refresh + youtube.upload scope check
     python main.py --verify-tiktok [--category gadgets --lang he]      # token + Direct Post permission check
+    python main.py --verify-telegram [--category gadgets --lang he]    # bot token + channel posting rights check
     python main.py --import-sqlite tarshish_engine.db   # copy a local SQLite database into DATABASE_URL (Supabase)
 """
 
@@ -155,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--verify-tiktok", action="store_true",
                         help="check the TikTok accounts of the matrix (user access token, Direct Post permission, "
                              "privacy levels) with read-only calls; --category / --lang narrow it")
+    manage.add_argument("--verify-telegram", action="store_true",
+                        help="check the Telegram channels of the matrix (bot token, chat, posting rights) with "
+                             "read-only calls; --category / --lang narrow it")
     manage.add_argument("--import-sqlite", metavar="FILE",
                         help="copy everything from a local SQLite database file into the configured "
                              "DATABASE_URL (PostgreSQL / Supabase), keeping ids")
@@ -177,9 +181,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--source only applies to --harvest")
     if (args.content_types or args.force) and not args.publish:
         parser.error("--content-types and --force only apply to --publish")
-    verifying = args.verify_instagram or args.verify_youtube or args.verify_tiktok
+    verifying = args.verify_instagram or args.verify_youtube or args.verify_tiktok or args.verify_telegram
     if args.lang and not (args.publish or verifying or args.flush_queue or args.retry_failed or args.stats):
-        parser.error("--lang applies to --publish (and narrows --verify-instagram/--verify-youtube/--verify-tiktok, "
+        parser.error("--lang applies to --publish (and narrows --verify-instagram/--verify-youtube/--verify-tiktok/"
+                     "--verify-telegram, "
                      "--flush-queue, --retry-failed, --stats)")
     if args.seed_temu and args.seed_aliexpress:
         parser.error("run --seed-temu and --seed-aliexpress separately (they share --category/--keyword/--limit)")
@@ -196,7 +201,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--keyword and --job only apply to --seed-temu / --seed-aliexpress "
                      "(--harvest uses the category's stored search rules)")
     if verifying and (args.dry_run or args.mode or args.limit or args.force or args.harvest or args.publish):
-        parser.error("--verify-instagram / --verify-youtube / --verify-tiktok only read from the APIs; "
+        parser.error("--verify-instagram / --verify-youtube / --verify-tiktok / --verify-telegram only read from the APIs; "
                      "they take --category / --lang and nothing else")
 
 
@@ -367,8 +372,10 @@ def cmd_verify_instagram(engine, category: str | None, language: str | None) -> 
     return ready
 
 
-# Short-form video platforms: platform -> (plugin module, report title, setup_roadmap.html section)
+# Other platforms: platform -> (plugin module, report title, setup_roadmap.html section)
 _VIDEO_CHECKS = {
+    "telegram": ("plugins.publishers.telegram_pub", "Telegram Bot API · channel check",
+                 'the Telegram step of the setup roadmap'),
     "youtube": ("plugins.publishers.youtube_pub", "YouTube Data API v3 (Shorts) · OAuth check",
                 'section A of "Short-Form Video APIs Setup (YouTube Shorts & TikTok)"'),
     "tiktok": ("plugins.publishers.tiktok_pub", "TikTok Content Posting API (Direct Post) · token check",
@@ -377,7 +384,7 @@ _VIDEO_CHECKS = {
 
 
 def cmd_verify_video(engine, platform: str, category: str | None, language: str | None) -> bool:
-    """Print a read-only connection report for each YouTube / TikTok account; True when all are ready."""
+    """Print a read-only connection report for each YouTube / TikTok / Telegram account; True when all are ready."""
     import importlib
 
     module_name, title, section = _VIDEO_CHECKS[platform]
@@ -491,8 +498,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         from core import bootstrap
-        from core.orchestrator import pipeline_id_for
-        from core.resilience import ConfigError, TarshishError
+        from core.resilience import ConfigError
 
         engine = bootstrap(log_level=args.log_level)
     except ImportError as exc:
@@ -512,6 +518,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n[DATABASE ERROR] {exc}\nCheck DATABASE_URL (or DATABASE_PATH).\n", file=sys.stderr)
         return EXIT_CONFIG
 
+    return dispatch(engine, args, parser)
+
+
+def dispatch(engine, args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> int:
+    """Run validated CLI arguments against a bootstrapped engine and return the exit code.
+
+    Shared by the command line and the web admin (``storefront_api/admin.py``), which runs the
+    same commands as background jobs and records what they print.
+    """
+    from core.orchestrator import pipeline_id_for
+    from core.resilience import ConfigError, TarshishError
+
     pipeline_id = pipeline_id_for(args.category, args.lang) if args.category and args.lang else None
     try:
         if args.harvest:
@@ -528,7 +546,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify_instagram:
             management = True
             failed = not cmd_verify_instagram(engine, args.category, args.lang)
-        for platform, wanted in (("youtube", args.verify_youtube), ("tiktok", args.verify_tiktok)):
+        for platform, wanted in (("youtube", args.verify_youtube), ("tiktok", args.verify_tiktok),
+                                 ("telegram", args.verify_telegram)):
             if wanted:
                 management = True
                 failed = (not cmd_verify_video(engine, platform, args.category, args.lang)) or failed
@@ -569,7 +588,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd_stats(engine, pipeline_id)
         if management:
             return EXIT_FAILURES if failed else EXIT_OK
-        parser.print_usage(sys.stderr)
+        if parser is not None:
+            parser.print_usage(sys.stderr)
         print("\nChoose a stage: --harvest (Stage 1: fetch products) or --publish (Stage 2: generate and publish), "
               "--mode worker, or a management flag. See --help.", file=sys.stderr)
         return EXIT_CONFIG
@@ -579,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     except TarshishError as exc:
         print(f"\n[ERROR] {exc}", file=sys.stderr)
         return EXIT_FAILURES
+
 
 
 if __name__ == "__main__":

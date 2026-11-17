@@ -275,6 +275,7 @@ class TikTokPublisher(BasePublisher):
         "client_key": _CLIENT_KEY_ENV, "client_secret": _CLIENT_SECRET_ENV,
     }
     account_credential = "refresh_token"
+    inline_credentials = {"client_key": "client_key"}
     _transport: Any = None              # test hook: an httpx.MockTransport instead of the network
     chunk_size: int = DEFAULT_CHUNK
     single_upload_max: int = MAX_CHUNK

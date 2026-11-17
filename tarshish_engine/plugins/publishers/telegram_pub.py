@@ -60,6 +60,7 @@ class _Call:
 class TelegramPublisher(BasePublisher):
     required_credentials = ("token", "chat_id")
     account_credential = "chat_id"
+    inline_credentials = {"chat_id": "chat_id"}
     default_env_vars = {"token": "TELEGRAM_BOT_TOKEN", "chat_id": "TELEGRAM_CHAT_ID"}
     _transport: Any = None  # test hook: an httpx.MockTransport instead of the network
 
@@ -187,3 +188,122 @@ class TelegramPublisher(BasePublisher):
         logger.warning(
             "Telegram refused %s for %s (%s); falling back to %s.", call.method, self.target.page_name, exc, following
         )
+
+
+# --------------------------------------------------------------------------- #
+# Read-only connection check (`python main.py --verify-telegram`, web admin "Test connection")
+# --------------------------------------------------------------------------- #
+@dataclass
+class TelegramVerification:
+    """Outcome of ``getMe`` + ``getChat`` + ``getChatMember`` for one channel. Nothing is posted."""
+
+    page_name: str
+    bot_username: str | None = None
+    chat_title: str | None = None
+    chat_type: str | None = None
+    bot_can_post: bool | None = None
+    problems: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.bot_username) and bool(self.chat_title) and self.bot_can_post is not False and not self.problems
+
+    def summary(self) -> str:
+        bot = f"Bot @{self.bot_username}" if self.bot_username else "Bot not connected"
+        chat = f"{self.chat_type or 'chat'} \"{self.chat_title}\"" if self.chat_title else "chat not reachable"
+        post = {True: "can post", False: "cannot post", None: "posting rights unknown"}[self.bot_can_post]
+        return f"{bot} | {chat} | {post}"
+
+    def lines(self) -> list[str]:
+        mark = lambda ok: "✓" if ok else "✗"  # noqa: E731
+        rows = [
+            f"{mark(bool(self.bot_username))} Bot token      : "
+            + (f"valid (@{self.bot_username})" if self.bot_username else "invalid or not checked"),
+            f"{mark(bool(self.chat_title))} Chat           : "
+            + (f"{self.chat_title} ({self.chat_type})" if self.chat_title else "not found or bot not a member"),
+        ]
+        if self.bot_can_post is not None:
+            rows.append(f"{mark(self.bot_can_post)} Post rights    : "
+                        + ("the bot may post here" if self.bot_can_post else "make the bot an admin with 'Post messages'"))
+        rows.extend(f"✗ {problem}" for problem in self.problems)
+        return rows
+
+
+def _telegram_get(client: httpx.Client, token: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        response = client.get(f"{API_BASE}/bot{token}/{method}", params=params or {})
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise NonRetryableError(redact(f"{method}: {type(exc).__name__}: {exc}")) from None
+    if not payload.get("ok"):
+        raise NonRetryableError(redact(f"{method}: {payload.get('description') or f'HTTP {response.status_code}'}"))
+    return payload.get("result") or {}
+
+
+def verify_connection(token: str, chat_id: str, *, page_name: str = "default", transport: Any = None) -> TelegramVerification:
+    """Check the bot token and that the bot can reach (and post to) ``chat_id``. Read-only."""
+    result = TelegramVerification(page_name=page_name)
+    with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0), transport=transport) as client:
+        try:
+            me = _telegram_get(client, token, "getMe")
+            result.bot_username = me.get("username")
+        except NonRetryableError as exc:
+            result.problems.append(f"bot token rejected: {exc}")
+            return result
+        try:
+            chat = _telegram_get(client, token, "getChat", {"chat_id": chat_id})
+            result.chat_title = chat.get("title") or chat.get("username") or str(chat.get("id"))
+            result.chat_type = chat.get("type")
+        except NonRetryableError as exc:
+            result.problems.append(f"chat {chat_id} not reachable: {exc}")
+            return result
+        if result.chat_type in ("channel", "group", "supergroup") and me.get("id"):
+            try:
+                member = _telegram_get(client, token, "getChatMember", {"chat_id": chat_id, "user_id": me["id"]})
+                status = member.get("status")
+                if status == "creator":
+                    result.bot_can_post = True
+                elif status == "administrator":
+                    result.bot_can_post = result.chat_type != "channel" or bool(member.get("can_post_messages", True))
+                else:
+                    result.bot_can_post = result.chat_type != "channel" and status == "member"
+            except NonRetryableError as exc:
+                result.problems.append(f"could not read the bot's rights: {exc}")
+        else:
+            result.bot_can_post = True
+    return result
+
+
+def verify_pages(registry: Any, pages: Any, *, transport: Any = None) -> list[TelegramVerification]:
+    """Resolve each ``telegram_pub`` social page's credentials and verify it (read-only)."""
+    results: list[TelegramVerification] = []
+    for page in pages:
+        if page.platform != "telegram_pub":
+            continue
+        target, reason = registry.resolve_target(page)
+        if target is None:
+            refs = {**TelegramPublisher.default_env_vars, **page.env_refs()}
+            results.append(TelegramVerification(
+                page_name=page.page_name,
+                problems=[f"not configured: {reason or 'credentials missing'} "
+                          f"(expects {refs['token']} and a chat id: {refs['chat_id']} or platform metadata chat_id)"],
+            ))
+            continue
+        results.append(verify_connection(
+            target.credential("token"), target.credential("chat_id"), page_name=page.page_name, transport=transport,
+        ))
+    return results
+
+
+def pages_to_verify(registry: Any, category: str | None = None, language: str | None = None) -> list[Any]:
+    """The Telegram channels of the social-accounts matrix (one check per bot token + chat)."""
+    from core.config import SocialPage
+
+    pages: dict[tuple[str, str], Any] = {}
+    for account in registry.list_social_accounts(category=category, language=language, platform="telegram"):
+        page = registry.social_page(account)
+        refs = {**TelegramPublisher.default_env_vars, **page.env_refs()}
+        pages.setdefault((refs["token"], str(page.options().get("chat_id") or refs["chat_id"])), page)
+    if not pages and category is None and language is None:
+        return [SocialPage(platform="telegram_pub", page_name="default")]
+    return list(pages.values())

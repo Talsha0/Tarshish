@@ -67,4 +67,4 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
         env:
-          API_ORIGIN: https://api.example.invalid
+          BACKEND_API_URL: https://api.example.invalid

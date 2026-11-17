@@ -11,6 +11,7 @@ Endpoints
     GET  /api/categories                 active categories with product counts
     POST /api/track-click/{product_id}   log a confirmed outbound click, return the affiliate link
     GET  /api/health                     liveness + number of listed products
+    *    /api/admin/...                   the admin control plane (X-Admin-Key; see storefront_api/admin.py)
 
 The API reads and writes the same database as the pipelines and the dashboard: Supabase
 PostgreSQL in production (``DATABASE_URL``), a local SQLite file otherwise (``DATABASE_PATH``).
@@ -36,6 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from storefront_api import search
+from storefront_api.admin import mount_admin
 from core.config import Settings, default_env_file, load_settings
 from core.database import Database
 from core.models import utcnow
@@ -296,6 +298,18 @@ def _number(settings: Settings, name: str, default: float) -> float:
         return default
 
 
+def allowed_origins(settings: Settings) -> list[str]:
+    """Browser origins allowed to call the API: ``ALLOWED_ORIGINS`` plus the older ``STOREFRONT_ORIGINS``.
+
+    The Next.js storefront and admin portal proxy every call server-side, so a browser normally
+    never calls the API cross-origin; list your Vercel domain(s) here for any other front end.
+    """
+    configured = [settings.get_env(name) for name in ("ALLOWED_ORIGINS", "STOREFRONT_ORIGINS")]
+    raw = ",".join(value for value in configured if value) or DEFAULT_ORIGINS
+    origins = [origin.strip().rstrip("/") for origin in raw.split(",")]
+    return list(dict.fromkeys(origin for origin in origins if origin))
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the API on top of the engine's settings and database."""
     if settings is None:
@@ -325,14 +339,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url="/api/openapi.json",
     )
-    origins = [origin.strip() for origin in (settings.get_env("STOREFRONT_ORIGINS", DEFAULT_ORIGINS) or "").split(",")]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[origin for origin in origins if origin],
-        allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_origins=allowed_origins(settings),
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Content-Type", "X-Admin-Key"],
     )
     app.state.catalogue = catalogue
+    mount_admin(app, settings)
 
     # Public catalogue reads may be cached by the CDN in front of the API (Vercel's edge) for a
     # short while; clicks and health checks never are. STOREFRONT_CACHE_SECONDS=0 turns it off.

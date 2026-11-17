@@ -53,7 +53,7 @@ from core.resilience import get_logger
 
 logger = get_logger("database")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS social_accounts (
     account_handle     TEXT NOT NULL,
     token_env_var      TEXT,                               -- env-var NAMES only, never secrets
     account_id_env_var TEXT,
+    platform_metadata_json TEXT,                           -- non-secret platform ids (app_id, chat_id …)
     enabled            INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     created_at         TEXT NOT NULL,
     PRIMARY KEY (category_id, language, platform)
@@ -209,6 +210,29 @@ CREATE INDEX IF NOT EXISTS idx_click_events_time     ON click_events (clicked_at
 CREATE INDEX IF NOT EXISTS idx_click_events_product  ON click_events (product_id, clicked_at);
 CREATE INDEX IF NOT EXISTS idx_click_events_category ON click_events (category, source);
 """
+
+# Background jobs started from the web admin (harvest, publish, verify …) and their console output.
+JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_runs (
+    id           TEXT PRIMARY KEY,                    -- random hex id handed to the caller
+    kind         TEXT NOT NULL,                       -- harvest | publish | verify | seed | queue_worker ...
+    params_json  TEXT NOT NULL DEFAULT '{}',
+    argv_json    TEXT NOT NULL DEFAULT '[]',          -- the equivalent `python main.py ...` arguments
+    status       TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+    exit_code    INTEGER,
+    log_text     TEXT NOT NULL DEFAULT '',            -- console output, already redacted
+    error        TEXT,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_job_runs_created ON job_runs (created_at);
+"""
+
+# Columns added to configuration tables after their first release (table -> {name: definition}).
+CONFIG_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "social_accounts": {"platform_metadata_json": "TEXT"},
+}
 
 # ``sort_by`` values of the storefront API -> ORDER BY (a fixed whitelist, never user text).
 STOREFRONT_ORDER: dict[str, str] = {
@@ -501,6 +525,7 @@ class Database:
             conn.executescript(LEDGER_SCHEMA)
             self._migrate(conn)
             conn.executescript(STOREFRONT_SCHEMA)
+            conn.executescript(JOBS_SCHEMA)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
 
     def _postgres_schema_version(self, conn: Any) -> int:
@@ -589,6 +614,18 @@ class Database:
         Adds the storefront columns to tables that predate them, and folds the legacy
         pre-v3 category column (renamed in v3) into ``category`` before dropping it.
         """
+        for table, columns in CONFIG_ADDED_COLUMNS.items():
+            present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns.items():
+                if name in present:
+                    continue
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+                else:
+                    logger.info("Database migration: added %s.%s.", table, name)
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(products)")}
         for name, definition in PRODUCT_STOREFRONT_COLUMNS.items():
             if name in existing:
@@ -651,7 +688,7 @@ class Database:
         ),
         "social_accounts": (
             ("category_id", "language", "platform"),
-            ("account_handle", "token_env_var", "account_id_env_var", "enabled"),
+            ("account_handle", "token_env_var", "account_id_env_var", "platform_metadata_json", "enabled"),
         ),
     }
     _CONFIG_ORDER = {
@@ -1011,9 +1048,17 @@ class Database:
         statuses: Sequence[str] | None = None,
         pipeline_id: str | None = None,
         limit: int = 200,
+        *,
+        category: str | None = None,
+        language: str | None = None,
+        account_platform: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        for column, value in (("category", category), ("language", language), ("account_platform", account_platform)):
+            if value:
+                clauses.append(f"pub.{column} = ?")
+                params.append(value)
         if statuses:
             clauses.append(f"pub.status IN ({', '.join('?' for _ in statuses)})")
             params.extend(statuses)
@@ -1087,6 +1132,64 @@ class Database:
         for row in self.query(f"SELECT status, COUNT(*) AS n FROM publications {where} GROUP BY status", params):
             counts[row["status"]] = int(row["n"])
         return counts
+
+    def get_publication(self, publication_id: int) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM publications WHERE id = ?", (publication_id,))
+
+    def delete_publication(self, publication_id: int) -> bool:
+        """Delete one publication row (its metrics snapshots go with it; AI spend stays in ``ai_usage``)."""
+        with self.connect() as conn:
+            conn.execute("DELETE FROM metrics_snapshots WHERE publication_id = ?", (publication_id,))
+            return conn.execute("DELETE FROM publications WHERE id = ?", (publication_id,)).rowcount > 0
+
+    def requeue_now(self, publication_id: int) -> bool:
+        """Make a QUEUED or FAILED row due immediately (``Publish now`` in the web admin)."""
+        return self._execute(
+            "UPDATE publications SET status = 'QUEUED', error_message = NULL, scheduled_for = ? "
+            "WHERE id = ? AND status IN ('QUEUED', 'FAILED')",
+            (to_iso(utcnow()), publication_id),
+        ) > 0
+
+    # -- background jobs (web admin) ------------------------------------------- #
+    def create_job_run(self, job_id: str, kind: str, params: Mapping[str, Any], argv: Sequence[str]) -> None:
+        self._execute(
+            "INSERT INTO job_runs (id, kind, params_json, argv_json, status, created_at) VALUES (?, ?, ?, ?, 'QUEUED', ?)",
+            (job_id, kind, json.dumps(dict(params), ensure_ascii=False, default=str),
+             json.dumps(list(argv), ensure_ascii=False), to_iso(utcnow())),
+        )
+
+    def start_job_run(self, job_id: str) -> None:
+        self._execute("UPDATE job_runs SET status = 'RUNNING', started_at = ? WHERE id = ?", (to_iso(utcnow()), job_id))
+
+    def write_job_log(self, job_id: str, log_text: str) -> None:
+        self._execute("UPDATE job_runs SET log_text = ? WHERE id = ?", (log_text, job_id))
+
+    def finish_job_run(
+        self, job_id: str, *, status: str, exit_code: int | None, log_text: str, error: str | None = None
+    ) -> None:
+        self._execute(
+            "UPDATE job_runs SET status = ?, exit_code = ?, log_text = ?, error = ?, finished_at = ? WHERE id = ?",
+            (status, exit_code, log_text, error, to_iso(utcnow()), job_id),
+        )
+
+    def get_job_run(self, job_id: str) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM job_runs WHERE id = ?", (job_id,))
+
+    def list_job_runs(self, limit: int = 30, kind: str | None = None) -> list[dict[str, Any]]:
+        where, params = ("WHERE kind = ?", (kind,)) if kind else ("", ())
+        return self.query(
+            "SELECT id, kind, params_json, argv_json, status, exit_code, error, created_at, started_at, finished_at "
+            f"FROM job_runs {where} ORDER BY created_at DESC, id LIMIT ?",
+            (*params, limit),
+        )
+
+    def fail_interrupted_jobs(self, older_than: datetime) -> int:
+        """Jobs left QUEUED/RUNNING by a process that stopped (restart, deploy) are marked FAILED."""
+        return self._execute(
+            "UPDATE job_runs SET status = 'FAILED', error = ?, finished_at = ? "
+            "WHERE status IN ('QUEUED', 'RUNNING') AND created_at < ?",
+            ("Interrupted: the backend process stopped before the job finished.", to_iso(utcnow()), to_iso(older_than)),
+        )
 
     # -- AI spend ledger ------------------------------------------------------ #
     def record_ai_usage(

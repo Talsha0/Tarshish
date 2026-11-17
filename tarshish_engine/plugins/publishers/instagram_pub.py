@@ -213,6 +213,7 @@ def _client(transport: Any) -> httpx.Client:
 class InstagramPublisher(BasePublisher):
     required_credentials = ("token", "account_id")
     default_env_vars = {"token": _TOKEN_ENV, "account_id": _ACCOUNT_ENV}
+    inline_credentials = {"business_account_id": "account_id"}
     _transport: Any = None  # test hook: an httpx.MockTransport instead of the network
 
     def __init__(self, context: PluginContext, target: PublishTarget) -> None:

@@ -104,6 +104,9 @@ class BasePublisher(ABC):
     default_env_vars: ClassVar[Mapping[str, str]] = {}
     # The credential a social account's ``account_id_env_var`` feeds (Instagram: account_id, Telegram: chat_id).
     account_credential: ClassVar[str] = "account_id"
+    # Non-secret identifiers a social account may give inline in its platform metadata instead of an
+    # env var: metadata key -> credential name (Instagram: {"business_account_id": "account_id"}).
+    inline_credentials: ClassVar[Mapping[str, str]] = {}
 
     def __init__(self, context: PluginContext, target: PublishTarget) -> None:
         self.context = context

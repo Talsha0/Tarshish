@@ -301,6 +301,55 @@ def _blank_to_none(data: Any) -> Any:
     return data
 
 
+_METADATA_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
+def _looks_like_token(text: str) -> bool:
+    """A long, unbroken mix of upper case, lower case and digits: an access token, not an id."""
+    return (
+        len(text) >= 32 and re.fullmatch(r"[A-Za-z0-9_\-]+", text) is not None
+        and any(c.isupper() for c in text) and any(c.islower() for c in text) and any(c.isdigit() for c in text)
+    )
+
+
+def validate_platform_metadata(value: Any) -> dict[str, str]:
+    """Non-secret platform identifiers of a social account as ``{key: text}``.
+
+    Accepts a dict or its JSON text. Keys are snake_case; values are short scalars. Anything that
+    is or looks like a credential is refused: secrets belong in the environment, referenced by name.
+    """
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"is not valid JSON ({exc.msg})") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("must be an object of identifiers, e.g. {\"app_id\": \"1234567890\"}")
+    cleaned: dict[str, str] = {}
+    for key, raw in value.items():
+        key = str(key).strip().lower()
+        if not _METADATA_KEY_RE.fullmatch(key):
+            raise ValueError(f"key '{key}' must be snake_case letters, digits and '_' (e.g. business_account_id)")
+        if key in _RAW_SECRET_KEYS or key.endswith(ENV_VAR_SUFFIX):
+            raise ValueError(
+                f"'{key}' is a credential; put it in the environment and reference the variable NAME "
+                "in token_env_var / account_id_env_var"
+            )
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        if not isinstance(raw, (str, int, float)) or isinstance(raw, bool):
+            raise ValueError(f"'{key}' must be text or a number")
+        text = str(raw).strip()
+        if len(text) > 200:
+            raise ValueError(f"'{key}' is longer than 200 characters")
+        if looks_like_secret(text) or _looks_like_token(text):
+            raise ValueError(f"'{key}' looks like a raw credential; store it in the environment instead")
+        cleaned[key] = text
+    return cleaned
+
+
 # --------------------------------------------------------------------------- #
 # Publishing targets (runtime shape handed to publisher plugins)
 # --------------------------------------------------------------------------- #
@@ -531,12 +580,20 @@ class SocialAccount(BaseModel):
     account_handle: str = Field(min_length=1)
     token_env_var: str | None = None
     account_id_env_var: str | None = None
+    # Non-secret platform identifiers, e.g. {"app_id": …, "business_account_id": …} (Instagram),
+    # {"client_key": …} (TikTok), {"client_id": …, "channel_id": …} (YouTube), {"chat_id": …} (Telegram).
+    platform_metadata: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
 
     @model_validator(mode="before")
     @classmethod
     def _blank_to_none(cls, data: Any) -> Any:
         return _blank_to_none(data)
+
+    @field_validator("platform_metadata", mode="before")
+    @classmethod
+    def _valid_metadata(cls, value: Any) -> Any:
+        return validate_platform_metadata(value)
 
     @field_validator("category_id", mode="before")
     @classmethod
@@ -578,11 +635,17 @@ class SocialAccount(BaseModel):
         return f"{self.platform} → {self.account_handle} ({self.category_id}/{self.language})"
 
     def to_record(self) -> dict[str, Any]:
-        return self.model_dump() | {"enabled": int(self.enabled)}
+        record = self.model_dump(exclude={"platform_metadata"}) | {"enabled": int(self.enabled)}
+        record["platform_metadata_json"] = (
+            json.dumps(self.platform_metadata, ensure_ascii=False, sort_keys=True) if self.platform_metadata else None
+        )
+        return record
 
     @classmethod
     def from_record(cls, row: Mapping[str, Any]) -> "SocialAccount":
-        return cls.model_validate(_record_fields(cls, row))
+        fields = _record_fields(cls, row)
+        fields["platform_metadata"] = row.get("platform_metadata_json") or {}
+        return cls.model_validate(fields)
 
 
 # --------------------------------------------------------------------------- #

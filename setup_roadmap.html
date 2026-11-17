@@ -121,6 +121,7 @@
   .phase[data-phase="2"] { --accent: var(--p2); --accent-soft: var(--p2-soft); }
   .phase[data-phase="ig"] { --accent: var(--p3); --accent-soft: var(--p3-soft); }
   .phase[data-phase="video"] { --accent: var(--p4); --accent-soft: var(--p4-soft); }
+  .phase[data-phase="admin"] { --accent: var(--p2); --accent-soft: var(--p2-soft); }
   .phase-head { border-top: 3px solid var(--accent); padding-top: 16px; }
   .phase-head .kicker { color: var(--accent); font-weight: 700; }
   h2 { font-family: var(--serif); font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; margin: 4px 0 8px; }
@@ -173,6 +174,7 @@
   .phase[data-phase="2"] .step-num::before { content: "2." counter(step); }
   .phase[data-phase="ig"] .step-num::before { content: "IG." counter(step); }
   .phase[data-phase="video"] .step-num::before { content: "V." counter(step); }
+  .phase[data-phase="admin"] .step-num::before { content: "W." counter(step); }
   .step-body p { margin: 8px 0 0; }
   .step-body p.done-when {
     margin-top: 12px; padding: 8px 12px; border-radius: 8px;
@@ -1291,6 +1293,150 @@ python main.py --verify-tiktok
 python main.py --publish --category gadgets --lang he --content-types youtube_short,tiktok_video --dry-run</code></pre></div>
           <p class="done-when"><strong>Done when:</strong> both reports end with <code>Ready for live publishing.</code> and
             the dry-run shows <code>youtube_pub</code> and <code>tiktok_pub</code> as ready.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+
+  <section class="phase" data-phase="admin" id="web-admin-setup">
+    <div class="phase-head">
+      <div class="kicker">Web admin</div>
+      <h2>Vercel Deployment &amp; Web Admin Setup</h2>
+      <p class="phase-intro">Run every <code>python main.py</code> operation — harvests, publishing pipelines, connection
+        checks, seeding, queue management and configuration — from <code>yourdomain.com/admin</code>. The Next.js
+        storefront on Vercel hosts the portal; the long-running FastAPI backend does the work. The portal never sees a
+        token: forms take environment-variable <em>names</em> and show <code>Configured</code> / <code>Missing</code>.</p>
+      <div class="phase-progress">
+        <div class="meter" data-meter="admin"><span></span></div>
+        <span class="count" data-count="admin">0 of 0</span>
+      </div>
+    </div>
+
+    <h3 class="group">A · How the pieces talk</h3>
+    <div class="cmd"><pre><code>browser ──► yourdomain.com (Next.js on Vercel)
+              /api/backend/*        ──rewrite──►  BACKEND_API_URL/api/*        (public catalogue)
+              /api/backend/admin/*  ──route────►  BACKEND_API_URL/api/admin/*  (+ X-Admin-Key, added on the server)
+                                                  FastAPI + engine (VPS / Cloudflare Tunnel) ──► database</code></pre></div>
+    <p>Harvests and video publishing run for minutes, so they run as background jobs on the backend and the portal polls
+      their console output. A serverless function stops as soon as it answers, which is why the backend that runs jobs
+      must be a long-running process (a VPS, a home server behind Cloudflare Tunnel, Fly.io…). Pointed at a serverless
+      API instead, the portal still edits configuration but refuses to start jobs, and says so.</p>
+
+    <h3 class="group">B · Deploy</h3>
+    <ol class="steps">
+      <li class="step" data-step="w-secret">
+        <input class="step-check" type="checkbox" id="cb-w-secret">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-secret"><span class="step-num"></span> Choose the admin secret</label>
+          <p>Generate one long random value. It is both the admin login password and the key Vercel uses to call the
+            backend. The admin API stays closed (HTTP 503) while it is unset, shorter than 16 characters, or still the
+            example value.</p>
+          <div class="cmd"><pre><code>python -c "import secrets; print(secrets.token_urlsafe(32))"</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the value is in your password manager.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="w-backend">
+        <input class="step-check" type="checkbox" id="cb-w-backend">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-backend"><span class="step-num"></span> Run the backend where it can run jobs</label>
+          <p>On the server that already runs the engine (Phase 2), add to <code>tarshish_engine/.env</code>:</p>
+          <div class="cmd"><pre><code>ADMIN_API_SECRET=&lt;the secret from W.1&gt;
+ALLOWED_ORIGINS=https://yourdomain.com
+DATABASE_URL=postgresql://...        # the same database as the storefront</code></pre></div>
+          <p>Every credential the engine uses (RapidAPI keys, <code>ANTHROPIC_API_KEY</code>, page tokens such as
+            <code>IG_GADGETS_HE_TOKEN</code>) lives here too, never in the portal. Then run the API as a service:</p>
+          <div class="cmd"><pre><code>cd tarshish_engine
+python -m uvicorn storefront_api.server:app --host 127.0.0.1 --port 8000 --workers 1</code></pre></div>
+          <p>Keep <code>--workers 1</code>: background jobs run one at a time inside that process. A systemd unit like the
+            worker's in Phase 2 keeps it running.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>curl -H "X-Admin-Key: &lt;secret&gt;" http://127.0.0.1:8000/api/admin/session</code>
+            answers <code>{"ok": true, …}</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="w-expose">
+        <input class="step-check" type="checkbox" id="cb-w-expose">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-expose"><span class="step-num"></span> Expose the backend over HTTPS</label>
+          <p>Pick one. <strong>Cloudflare Tunnel</strong> (no open ports, works from home):</p>
+          <div class="cmd"><pre><code>cloudflared tunnel login
+cloudflared tunnel create tarshish-api
+cloudflared tunnel route dns tarshish-api api.yourdomain.com
+cloudflared tunnel run --url http://127.0.0.1:8000 tarshish-api</code></pre></div>
+          <p><strong>VPS with a reverse proxy</strong> (Caddy fetches the certificate itself):</p>
+          <div class="cmd"><pre><code># /etc/caddy/Caddyfile
+api.yourdomain.com {
+    reverse_proxy 127.0.0.1:8000
+}</code></pre></div>
+          <p>Everything under <code>/api/admin</code> requires the <code>X-Admin-Key</code> header; the rest is the public
+            storefront API.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>https://api.yourdomain.com/api/health</code> answers
+            <code>{"status": "ok", …}</code> and <code>/api/admin/overview</code> without the header answers 401.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="w-vercel">
+        <input class="step-check" type="checkbox" id="cb-w-vercel">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-vercel"><span class="step-num"></span> Deploy <code>storefront/</code> to Vercel</label>
+          <p>Vercel → <strong>Add New… → Project</strong> → this repository, Root Directory
+            <code>tarshish_engine/storefront</code> (Next.js is detected). Under <strong>Settings → Environment
+            Variables</strong>, for Production and Preview:</p>
+          <div class="cmd"><pre><code>BACKEND_API_URL=https://api.yourdomain.com
+ADMIN_API_SECRET=&lt;the same secret as the backend&gt;</code></pre></div>
+          <p><code>BACKEND_API_URL</code> is read at build time for the proxy rewrites, so <strong>redeploy</strong> after
+            changing it (<code>API_ORIGIN</code>, its older name, still works). <code>ADMIN_API_SECRET</code> is only read on
+            the server: it never reaches the browser bundle. Add your domain under <strong>Settings → Domains</strong>.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>https://yourdomain.com/he</code> lists products and
+            <code>https://yourdomain.com/admin</code> redirects to the login page, which says “Backend reachable”.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">C · First login and first page</h3>
+    <ol class="steps">
+      <li class="step" data-step="w-login">
+        <input class="step-check" type="checkbox" id="cb-w-login">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-login"><span class="step-num"></span> Log in and read the command center</label>
+          <p>Open <code>yourdomain.com/admin</code> and enter the admin secret. The browser receives only a signed,
+            HTTP-only session cookie (12 hours). The overview shows clicks, published posts, active products, the AI budget,
+            and the Temu / AliExpress failover chains with each provider's key variable as <code>Ready</code> or
+            <code>Missing</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> every provider you have a RapidAPI subscription for shows
+            <code>Ready</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="w-connect">
+        <input class="step-check" type="checkbox" id="cb-w-connect">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-connect"><span class="step-num"></span> Connect your first Instagram / TikTok / YouTube page</label>
+          <p><strong>Social accounts → Connect new social page.</strong> Step 1 picks the platform; step 2 asks for its
+            identifiers (Instagram: App ID and Business Account ID · TikTok: Client Key · YouTube: OAuth Client ID ·
+            Telegram: Chat ID) and the <em>name</em> of the variable holding the token, e.g.
+            <code>IG_GADGETS_HE_TOKEN</code>; step 3 picks the category — or creates one inline with its Hebrew/English
+            names and Temu/AliExpress keywords — and the language.</p>
+          <p>Then add the token itself to the <strong>backend's</strong> <code>.env</code> under that name and restart the
+            backend. The field turns from <code>✗ Missing</code> to <code>✓ Configured</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> <strong>Test connection</strong> on the page's card shows
+            <code>✓ Connected</code> (it makes the same read-only calls as <code>--verify-instagram</code>,
+            <code>--verify-tiktok</code>, <code>--verify-youtube</code> and <code>--verify-telegram</code>).</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="w-run">
+        <input class="step-check" type="checkbox" id="cb-w-run">
+        <div class="step-body">
+          <label class="step-title" for="cb-w-run"><span class="step-num"></span> Harvest and publish from the browser</label>
+          <p><strong>Harvest all sources</strong>, then <strong>Run publishing pipelines</strong> with <em>Dry run</em> on.
+            Each job's output streams into the console drawer exactly as the CLI prints it, and stays in
+            <strong>Queue &amp; jobs → Job history</strong>. <strong>Pipelines</strong> edits search keywords, price filters
+            and the AI model per content type; <strong>Queue</strong> retries, publishes now or deletes single posts.</p>
+          <p class="done-when"><strong>Done when:</strong> a dry run lists previews for your page, then a real run puts
+            posts in the queue.</p>
         </div>
       </li>
     </ol>

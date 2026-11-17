@@ -1,7 +1,7 @@
 // Typed client for the FindHub storefront API (api/server.py).
 //
 // In the browser every call is same-origin (`/api/...`, proxied by next.config.mjs).
-// On the server (page rendering) the backend is called directly at API_ORIGIN.
+// On the server (page rendering) the backend is called directly at BACKEND_API_URL (or API_ORIGIN).
 
 export type Store = {
   /** Stable id used by the `source` filter, e.g. "aliexpress". */
@@ -90,7 +90,8 @@ export class ApiError extends Error {
 
 function origin(): string {
   if (typeof window !== "undefined") return "";
-  return (process.env.API_ORIGIN ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+  const origin = process.env.BACKEND_API_URL?.trim() || process.env.API_ORIGIN?.trim() || "http://127.0.0.1:8000";
+  return origin.replace(/\/+$/, "");
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {

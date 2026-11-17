@@ -56,6 +56,7 @@ cd storefront && npm install && npm run dev
 | | |
 |---|---|
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Production: Supabase, Vercel, Streamlit Community Cloud, GitHub Actions and every environment variable. |
+| Web admin (`/admin`) | The Next.js admin control center: every CLI operation with live job logs, the social-accounts wizard, model routing and the queue. Backend: `tarshish_engine/storefront_api/admin.py`. Setup: *Vercel Deployment & Web Admin Setup* in `setup_roadmap.html`. |
 | [`setup_roadmap.html`](setup_roadmap.html) | Step-by-step checklist, from first run to production. Open it in a browser. |
 | [`tarshish_engine/README.md`](tarshish_engine/README.md) | Commands, configuration, architecture, how to add plugins. |
 | [`.claude/`](.claude/CLAUDE.md) | Project knowledge for Claude Code. It loads automatically when you open the repo; `/verify` runs the checks. |
