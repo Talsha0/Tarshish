@@ -25,7 +25,16 @@ same code as the command line, ``main.dispatch``, and record its console output:
     POST /api/admin/assets/publish           python main.py --publish-assets ID[,ID…]
 
 Generated FindHub assets (copy + branded image + links) are listed with ``GET /api/admin/assets`` and
-moved between DRAFT and QUEUED, marked as published by hand, or deleted with the routes below it.
+moved between DRAFT and QUEUED, edited, marked as published by hand, or deleted with the routes below it.
+
+The admin's Mobile Social Preview Simulator reviews every unpublished item one by one with:
+
+    PATCH  /api/admin/assets/{id}                edit generated_text / Story link stickers / Reel caption
+    POST   /api/admin/assets/{id}/publish        publish one asset now (job)
+    DELETE /api/admin/assets/{id}                delete it and its image, unless another row uses the file
+    PATCH  /api/admin/queue/{id}                 edit a queued publication's caption
+    POST   /api/admin/queue/{id}/publish-now     publish one publication now (job)
+    DELETE /api/admin/queue/{id}                 delete it and its local media, unless another row uses the file
 
 Configuration (categories, content profiles, the social-accounts matrix) is edited directly,
 with the same validation as ``config/*.yaml``. Credentials are never accepted: forms take the
@@ -304,6 +313,28 @@ class AssetPublishIn(BaseModel):
 
 class AssetStatusIn(BaseModel):
     status: Literal["DRAFT", "QUEUED"]
+
+
+class StoryLinkIn(BaseModel):
+    kind: Literal["storefront", "product", "affiliate"]
+    label: str = Field(min_length=1, max_length=60)
+    url: str = Field(min_length=8, max_length=2000, pattern=r"^https?://\S+$")
+
+
+class AssetPatch(BaseModel):
+    """Edits from the preview simulator; omitted fields are left unchanged."""
+
+    model_config = {"extra": "forbid"}
+
+    generated_text: str | None = Field(default=None, min_length=1, max_length=5000)
+    reel_caption: str | None = Field(default=None, min_length=1, max_length=2200)
+    story_links: list[StoryLinkIn] | None = Field(default=None, max_length=5)
+
+
+class QueuePatch(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    caption: str = Field(min_length=1, max_length=5000)
 
 
 class QueueScope(BaseModel):
@@ -936,22 +967,74 @@ class AdminService:
             raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is already published or being published.")
         return self.present_asset(self._asset(asset_id))
 
-    def delete_asset(self, asset_id: int) -> dict[str, Any]:
-        from pathlib import Path
+    def update_asset(self, asset_id: int, body: AssetPatch) -> dict[str, Any]:
+        import json
 
+        row = self._asset(asset_id)
+        if body.generated_text is None and body.reel_caption is None and body.story_links is None:
+            raise HTTPException(status_code=422, detail="Nothing to update: send generated_text, reel_caption or story_links.")
+        if row["status"] == "PUBLISHED" or row.get("locked_at"):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is {'being published' if row.get('locked_at') else 'already published'}; it can no longer be edited.")
+        text = body.generated_text.strip() if body.generated_text is not None else None
+        if text == "":
+            raise HTTPException(status_code=422, detail="generated_text must not be blank.")
+        links_json = None
+        if body.reel_caption is not None or body.story_links is not None:
+            links = json.loads(row.get("links_payload_json") or "{}")
+            if body.reel_caption is not None:
+                if row["content_type"] != "instagram_reel":
+                    raise HTTPException(status_code=422, detail="reel_caption only applies to Instagram Reels.")
+                links["reel_caption"] = body.reel_caption.strip()
+            if body.story_links is not None:
+                if row["content_type"] not in ("instagram_story", "instagram_reel"):
+                    raise HTTPException(status_code=422, detail="story_links only apply to Stories and Reels.")
+                links["story_links"] = [link.model_dump() for link in body.story_links]
+            links_json = json.dumps(links, ensure_ascii=False)
+        if not self.db.update_generated_asset_content(asset_id, generated_text=text, links_payload_json=links_json):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} changed while you were editing it; reload and try again.")
+        return self.present_asset(self._asset(asset_id))
+
+    def delete_asset(self, asset_id: int) -> dict[str, Any]:
         row = self._asset(asset_id)
         if not self.db.delete_generated_asset(asset_id):
             raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is being published right now.")
-        path = row.get("generated_image_path")
-        root = Path(self.engine.settings.generated_media_dir).resolve()
-        if path:
+        removed = self._remove_orphan_media(row.get("generated_image_path"), row.get("generated_image_url"))
+        return {"deleted": asset_id, "media_removed": removed}
+
+    def _remove_orphan_media(self, *references: str | None) -> bool:
+        """Delete a deleted row's local media file once no publication or asset points at it any more.
+
+        Only files inside the engine's own media folders (generated images, local video output) are
+        touched; bucket URLs and anything else are left alone. A ``/media/...`` URL maps back to the
+        generated-media folder.
+        """
+        from pathlib import Path
+        from urllib.parse import urlparse
+
+        settings = self.engine.settings
+        roots = [Path(settings.generated_media_dir).resolve(), Path(settings.local_media_dir).resolve()]
+        refs = [ref for ref in references if ref]
+        candidates: list[Path] = []
+        for ref in refs:
+            if ref.lower().startswith(("http://", "https://")):
+                path = urlparse(ref).path
+                if path.startswith("/media/"):
+                    candidates.append(roots[0] / path.removeprefix("/media/"))
+            else:
+                candidates.append(Path(ref))
+        removed = False
+        for candidate in dict.fromkeys(candidates):
             try:
-                file = Path(path).resolve()
-                if root in file.parents and file.is_file():
-                    file.unlink()
+                file = candidate.resolve()
+                if not any(root in file.parents for root in roots) or not file.is_file():
+                    continue
+                if self.db.media_reference_count(*refs, str(candidate), str(file)):
+                    continue  # another publication or asset still uses this file
+                file.unlink()
+                removed = True
             except OSError as exc:
-                logger.warning("Could not remove %s: %s", path, exc)
-        return {"deleted": asset_id}
+                logger.warning("Could not remove %s: %s", candidate, exc)
+        return removed
 
     # -- queue ------------------------------------------------------------------ #
     @staticmethod
@@ -968,8 +1051,83 @@ class AdminService:
         if statuses and any(s not in ("PENDING", "QUEUED", "PUBLISHED", "FAILED") for s in statuses):
             raise HTTPException(status_code=422, detail="status is one of QUEUED, PENDING, PUBLISHED, FAILED.")
         rows = self.db.list_publications(statuses, limit=limit, category=category, language=language,
-                                         account_platform=platform)
-        return {"items": rows, "counts": self.db.get_status_counts()}
+                                         account_platform=platform, include_content=True)
+        return {"items": [self.present_publication(row) for row in rows], "counts": self.db.get_status_counts()}
+
+    def post_text(self, row: dict[str, Any], content_json: str | None) -> tuple[str | None, str | None]:
+        """``(text, suffix)``: the post body the row's publisher will send, and what follows the caption in it.
+
+        Mirrors each publisher's ``render_caption`` (link or link-in-bio call to action, hashtags, disclosure,
+        platform length limits) so the admin's phone preview shows the real post. ``suffix`` lets the preview
+        re-render live while the caption is edited; it is ``None`` when the caption was shortened to fit.
+        """
+        from core.models import GeneratedContent, category_slug
+        from plugins.publishers import disclosure_enabled, render_post_text
+
+        try:
+            content = GeneratedContent.model_validate_json(content_json or "")
+        except ValidationError:
+            return None, None
+        if content.final_text:
+            return content.final_text.strip(), ""
+        disclosure = disclosure_enabled(self.engine.settings)
+        lang = content.language.split("-")[0]
+        path = f"/c/{category_slug(content.product.category)}"
+        platform = row.get("account_platform") or ""
+        if platform in ("instagram", "tiktok"):
+            from plugins.publishers import instagram_pub, tiktok_pub
+
+            module = instagram_pub if platform == "instagram" else tiktok_pub
+            cta = module._CALL_TO_ACTION
+            if platform == "instagram":
+                content = content.model_copy(update={"hashtags": content.hashtags[:instagram_pub.HASHTAG_LIMIT]})
+            text = render_post_text(content, max_length=module.CAPTION_LIMIT, disclosure=disclosure,
+                                    call_to_action=cta.get(lang, cta["en"]).format(path=path))
+        elif platform == "youtube":
+            from plugins.publishers import youtube_pub
+
+            text = render_post_text(content, max_length=youtube_pub.DESCRIPTION_UNITS, disclosure=disclosure)
+            if youtube_pub.SHORTS_TAG.lower() not in text.lower():
+                text = f"{text}\n\n{youtube_pub.SHORTS_TAG}"
+        elif platform == "telegram":
+            from plugins.publishers import telegram_pub
+
+            with_media = bool(content.media_public_url or content.product.image_urls)
+            text = render_post_text(content, disclosure=disclosure,
+                                    max_length=telegram_pub.CAPTION_LIMIT if with_media else telegram_pub.TEXT_LIMIT)
+        else:
+            text = render_post_text(content, disclosure=disclosure)
+        return text, (text[len(content.caption):] if text.startswith(content.caption) else None)
+
+    def present_publication(self, row: dict[str, Any]) -> dict[str, Any]:
+        """A queue row plus the few snapshot fields the phone preview needs (never the whole snapshot)."""
+        import json
+
+        item = {key: value for key, value in row.items() if key != "content_json"}
+        try:
+            content = json.loads(row.get("content_json") or "{}")
+        except ValueError:
+            content = {}
+        product = content.get("product") or {}
+        images = [url for url in product.get("image_urls") or [] if isinstance(url, str) and url.startswith(("http://", "https://"))]
+        media = content.get("media_public_url")
+        media = media if isinstance(media, str) and media.startswith(("http://", "https://")) else None
+        is_video = content.get("content_type") == "video" or bool(media and re.search(r"\.(mp4|mov|webm)(\?|$)", media, re.I))
+        video = (media or product.get("video_url")) if is_video else product.get("video_url")
+        text, suffix = self.post_text(row, row.get("content_json"))
+        item["preview"] = {
+            "post_text": text,
+            "post_suffix": suffix,
+            "hashtags": [str(tag) for tag in content.get("hashtags") or []],
+            "final_text": content.get("final_text"),
+            "image_url": (media if media and not is_video else None) or (images[0] if images else None),
+            "video_url": video if isinstance(video, str) and video.startswith(("http://", "https://")) else None,
+            "affiliate_url": product.get("affiliate_url"),
+            "price": product.get("price"),
+            "original_price": product.get("original_price"),
+            "currency": product.get("currency"),
+        }
+        return item
 
     def _publication(self, publication_id: int) -> dict[str, Any]:
         row = self.db.get_publication(publication_id)
@@ -1006,12 +1164,37 @@ class AdminService:
 
         return self.start_job("publish-now", {"publication_id": publication_id}, action)
 
+    def update_publication(self, publication_id: int, body: QueuePatch) -> dict[str, Any]:
+        from core.models import GeneratedContent
+
+        row = self._publication(publication_id)
+        if row["status"] not in ("QUEUED", "FAILED"):
+            raise HTTPException(status_code=409, detail=f"Publication #{publication_id} is {row['status']}; only queued or failed posts can be edited.")
+        caption = body.caption.strip()
+        if not caption:
+            raise HTTPException(status_code=422, detail="caption must not be blank.")
+        try:
+            content = GeneratedContent.model_validate_json(row["content_json"])
+        except ValidationError as exc:
+            raise HTTPException(status_code=409, detail=f"Publication #{publication_id} has an unreadable snapshot: {exc.error_count()} error(s).") from exc
+        # Pre-assembled posts (final_text) are posted verbatim, so the edit replaces that text too.
+        update: dict[str, Any] = {"caption": caption}
+        if content.final_text:
+            update["final_text"] = caption
+        content = content.model_copy(update=update)
+        if not self.db.update_publication_caption(publication_id, caption, content.model_dump_json()):
+            raise HTTPException(status_code=409, detail=f"Publication #{publication_id} changed while you were editing it; reload and try again.")
+        return {"id": publication_id, "caption": caption, "status": row["status"]}
+
     def delete_publication(self, publication_id: int) -> dict[str, Any]:
         row = self._publication(publication_id)
         if row["status"] == "PENDING":
             raise HTTPException(status_code=409, detail="This publication is being published right now.")
         self.db.delete_publication(publication_id)
-        return {"deleted": publication_id}
+        removed = False
+        if row["status"] != "PUBLISHED":  # a live post's media may still be served from this file
+            removed = self._remove_orphan_media(row.get("media_uri"))
+        return {"deleted": publication_id, "media_removed": removed}
 
     def flush(self, scope: QueueScope) -> dict[str, Any]:
         return {"flushed": self.db.flush_queue(self._pipeline(scope))}
@@ -1176,6 +1359,10 @@ def build_router(ctx: AdminContext) -> APIRouter:
     def mark_asset_published(asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
         return service.mark_asset_published(asset_id)
 
+    @router.patch("/assets/{asset_id}")
+    def update_asset(body: AssetPatch, asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.update_asset(asset_id, body)
+
     @router.delete("/assets/{asset_id}")
     def delete_asset(asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
         return service.delete_asset(asset_id)
@@ -1206,6 +1393,10 @@ def build_router(ctx: AdminContext) -> APIRouter:
     @router.post("/queue/{publication_id}/publish-now", status_code=202)
     def publish_now(publication_id: int = PathParam(ge=1)) -> dict[str, Any]:
         return service.publish_now(publication_id)
+
+    @router.patch("/queue/{publication_id}")
+    def update_publication(body: QueuePatch, publication_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.update_publication(publication_id, body)
 
     @router.delete("/queue/{publication_id}")
     def delete_publication(publication_id: int = PathParam(ge=1)) -> dict[str, Any]:

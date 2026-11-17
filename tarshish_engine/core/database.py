@@ -1100,7 +1100,9 @@ class Database:
         category: str | None = None,
         language: str | None = None,
         account_platform: str | None = None,
+        include_content: bool = False,
     ) -> list[dict[str, Any]]:
+        """Publications, newest first; ``include_content`` adds the ``content_json`` snapshot (admin previews)."""
         clauses: list[str] = []
         params: list[Any] = []
         for column, value in (("category", category), ("language", language), ("account_platform", account_platform)):
@@ -1120,7 +1122,7 @@ class Database:
                    pub.platform, pub.target_page, pub.content_type, pub.status,
                    p.title AS product_title, pub.caption, pub.media_uri, pub.model_used, pub.generation_cost_usd,
                    pub.platform_post_id, pub.scheduled_for, pub.published_at, pub.error_message, pub.attempts,
-                   pub.created_at
+                   pub.created_at{", pub.content_json" if include_content else ""}
             FROM publications pub JOIN products p ON p.id = pub.product_id
             {where}
             ORDER BY pub.id DESC
@@ -1189,6 +1191,27 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM metrics_snapshots WHERE publication_id = ?", (publication_id,))
             return conn.execute("DELETE FROM publications WHERE id = ?", (publication_id,)).rowcount > 0
+
+    def update_publication_caption(self, publication_id: int, caption: str, content_json: str) -> bool:
+        """Replace the caption of a row that is not published or in flight (QUEUED or FAILED only)."""
+        return self._execute(
+            "UPDATE publications SET caption = ?, content_json = ? WHERE id = ? AND status IN ('QUEUED', 'FAILED')",
+            (caption, content_json, publication_id),
+        ) > 0
+
+    def media_reference_count(self, *uris: str) -> int:
+        """How many publications and generated assets still point at any of ``uris`` (orphan-media checks)."""
+        uris = tuple(dict.fromkeys(u for u in uris if u))
+        if not uris:
+            return 0
+        marks = ", ".join("?" for _ in uris)
+        row = self.query_one(
+            f"SELECT (SELECT COUNT(*) FROM publications WHERE media_uri IN ({marks})) + "
+            f"(SELECT COUNT(*) FROM generated_assets WHERE generated_image_path IN ({marks}) "
+            f"OR generated_image_url IN ({marks})) AS n",
+            (*uris, *uris, *uris),
+        )
+        return int(row["n"]) if row else 0
 
     def requeue_now(self, publication_id: int) -> bool:
         """Make a QUEUED or FAILED row due immediately (``Publish now`` in the web admin)."""
@@ -1392,6 +1415,17 @@ class Database:
             "UPDATE generated_assets SET status = 'PUBLISHED', published_at = ?, platform_post_id = ?, "
             "error_message = NULL, updated_at = ? WHERE id = ? AND locked_at IS NULL AND status != 'PUBLISHED'",
             (now, note or "manual", now, asset_id),
+        ) > 0
+
+    def update_generated_asset_content(
+        self, asset_id: int, *, generated_text: str | None = None, links_payload_json: str | None = None,
+    ) -> bool:
+        """Edit the copy and/or links of an unpublished asset that is not being published right now."""
+        return self._execute(
+            "UPDATE generated_assets SET generated_text = COALESCE(?, generated_text), "
+            "links_payload_json = COALESCE(?, links_payload_json), updated_at = ? "
+            "WHERE id = ? AND locked_at IS NULL AND status IN ('DRAFT', 'QUEUED', 'FAILED')",
+            (generated_text, links_payload_json, to_iso(utcnow()), asset_id),
         ) > 0
 
     def delete_generated_asset(self, asset_id: int) -> bool:

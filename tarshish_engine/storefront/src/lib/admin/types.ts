@@ -174,6 +174,23 @@ export type Publication = {
   error_message: string | null;
   attempts: number;
   created_at: string;
+  /** Snapshot fields for the phone preview (GET /api/admin/queue). */
+  preview?: PublicationPreview;
+};
+
+export type PublicationPreview = {
+  /** The exact post body the publisher will send (caption + link / call to action + hashtags + disclosure). */
+  post_text: string | null;
+  /** What follows the caption in post_text; null when the caption had to be shortened to fit. */
+  post_suffix: string | null;
+  hashtags: string[];
+  final_text: string | null;
+  image_url: string | null;
+  video_url: string | null;
+  affiliate_url: string | null;
+  price: number | null;
+  original_price: number | null;
+  currency: string | null;
 };
 
 // Generated FindHub assets (GET /api/admin/assets).

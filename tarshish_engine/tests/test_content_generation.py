@@ -432,7 +432,7 @@ def test_admin_lists_assets_and_media_is_served(catalogue, monkeypatch):
         assert api.post(f"/api/admin/assets/{reel}/status", headers=key, json={"status": "DRAFT"}).json()["status"] == "DRAFT"
         assert api.post(f"/api/admin/assets/{reel}/mark-published", headers=key).json()["status"] == "PUBLISHED"
         post = by_type["instagram_post"]
-        assert api.delete(f"/api/admin/assets/{post['id']}", headers=key).json() == {"deleted": post["id"]}
+        assert api.delete(f"/api/admin/assets/{post['id']}", headers=key).json() == {"deleted": post["id"], "media_removed": True}
         assert api.get(relative).status_code == 404
 
 

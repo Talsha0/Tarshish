@@ -19,6 +19,7 @@ import {
   Music2,
   RefreshCw,
   Send,
+  Smartphone,
   Trash2,
   Undo2,
   WandSparkles,
@@ -195,12 +196,14 @@ function AssetCard({
   selected,
   onSelect,
   onZoom,
+  onPreview,
   onChanged,
 }: {
   asset: GeneratedAsset;
   selected: boolean;
   onSelect: (value: boolean) => void;
   onZoom: () => void;
+  onPreview?: () => void;
   onChanged: () => void;
 }) {
   const { start } = useJobs();
@@ -212,6 +215,8 @@ function AssetCard({
   const vertical = asset.content_type !== "instagram_post";
   const manualOnly = asset.content_type === "instagram_story" || asset.content_type === "instagram_reel";
   const title = asset.language === "he" && asset.product_title_he ? asset.product_title_he : asset.product_title;
+  // Unpublished assets open in the phone preview; published ones in the full-resolution lightbox.
+  const reviewable = Boolean(onPreview) && asset.status !== "PUBLISHED";
 
   return (
     <article className={`adm-card flex flex-col overflow-hidden ${selected ? "ring-2 ring-adm-accent" : ""}`}>
@@ -244,22 +249,22 @@ function AssetCard({
         {/* Visual */}
         <button
           type="button"
-          onClick={src ? onZoom : undefined}
+          onClick={reviewable ? onPreview : src ? onZoom : undefined}
           className={`group relative shrink-0 overflow-hidden rounded-lg border border-adm-line bg-adm-bg ${vertical ? "aspect-[9/16] w-28" : "aspect-[4/5] w-32"}`}
-          aria-label={src ? "Open the full-resolution image" : "Text post (no image)"}
-          disabled={!src}
+          aria-label={reviewable ? "Open in the phone preview" : src ? "Open the full-resolution image" : "Text post (no image)"}
+          disabled={!src && !reviewable}
         >
           {src ? (
             <>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={src} alt="" loading="lazy" className="h-full w-full object-cover" />
               <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100">
-                <Maximize2 className="h-5 w-5" />
+                {reviewable ? <Smartphone className="h-5 w-5" /> : <Maximize2 className="h-5 w-5" />}
               </span>
             </>
           ) : asset.content_type === "telegram_post" ? (
             <span className="flex h-full flex-col items-center justify-center gap-1 p-2 text-center text-[11px] text-adm-faint">
-              <Send className="h-5 w-5" /> Text post · link preview
+              {reviewable ? <Smartphone className="h-5 w-5" /> : <Send className="h-5 w-5" />} Text post · link preview
             </span>
           ) : (
             <span className="flex h-full items-center justify-center text-adm-faint">
@@ -360,6 +365,11 @@ function AssetCard({
             onClick={() => void run("manual", () => adminApi(`assets/${asset.id}/mark-published`, { method: "POST" }), `#${asset.id} marked as published`).then((ok) => ok && onChanged())}
           >
             <Check className="h-3.5 w-3.5" /> Posted manually
+          </button>
+        )}
+        {reviewable && (
+          <button type="button" className="adm-btn px-2 py-1 text-xs" onClick={onPreview} title="Phone preview" aria-label={`Preview asset #${asset.id} on a phone`}>
+            <Smartphone className="h-3.5 w-3.5" />
           </button>
         )}
         {src && (
@@ -478,7 +488,7 @@ function GenerateModal({ categories, onClose, onStarted }: { categories: Categor
   );
 }
 
-export function AssetInspector() {
+export function AssetInspector({ onPreview, refreshKey = 0 }: { onPreview?: (assetId: number) => void; refreshKey?: number } = {}) {
   const { start, finishedCount } = useJobs();
   const [status, setStatus] = useState("");
   const [contentType, setContentType] = useState("");
@@ -496,9 +506,9 @@ export function AssetInspector() {
   if (language) params.set("language", language);
   const assets = useResource<AssetsResponse>(`assets?${params.toString()}`, 15_000);
   useEffect(() => {
-    if (finishedCount) void assets.reload();
+    if (finishedCount || refreshKey) void assets.reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [finishedCount]);
+  }, [finishedCount, refreshKey]);
 
   const items = useMemo(() => assets.data?.items ?? [], [assets.data]);
   const publishable = items.filter((item) => item.publishable);
@@ -602,6 +612,7 @@ export function AssetInspector() {
                 })
               }
               onZoom={() => setZoom(asset)}
+              onPreview={onPreview ? () => onPreview(asset.id) : undefined}
               onChanged={() => void assets.reload()}
             />
           ))}

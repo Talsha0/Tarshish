@@ -316,3 +316,113 @@ def test_queue_retry_publish_now_and_delete(api, harvested, console_route):
     assert api.ctx.engine().db.get_publication(second) is None
     assert api.post("/api/admin/queue/flush", headers=KEY, json={"category_id": "gadgets"}).status_code == 422
     assert api.post("/api/admin/queue/flush", headers=KEY, json={}).json() == {"flushed": 0}
+
+
+def test_queue_items_carry_preview_fields_and_captions_can_be_edited(api, harvested, console_route):
+    job = run_job(api, api.post("/api/admin/actions/publish", headers=KEY, json={
+        "category_id": "gadgets", "language": "he", "content_types": ["console_post"], "mode": "queued", "limit": 2,
+    }))
+    assert job["status"] == "SUCCEEDED", job["log"]
+    items = api.get("/api/admin/queue", params={"status": "QUEUED"}, headers=KEY).json()["items"]
+    assert len(items) == 2
+    first, second = items
+    assert "content_json" not in first
+    assert set(first["preview"]) >= {"hashtags", "image_url", "video_url", "affiliate_url", "price", "currency"}
+    assert first["preview"]["affiliate_url"].startswith("http")
+    preview = first["preview"]
+    assert preview["post_text"] == first["caption"] + preview["post_suffix"]  # what the publisher will send
+    assert preview["affiliate_url"] in preview["post_suffix"]
+
+    edited = api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "  כותרת חדשה 🔥  "})
+    assert edited.status_code == 200, edited.text
+    assert edited.json() == {"id": first["id"], "caption": "כותרת חדשה 🔥", "status": "QUEUED"}
+    row = api.ctx.engine().db.get_publication(first["id"])
+    assert row["caption"] == "כותרת חדשה 🔥" and json.loads(row["content_json"])["caption"] == "כותרת חדשה 🔥"
+    refreshed = {i["id"]: i for i in api.get("/api/admin/queue", headers=KEY).json()["items"]}[first["id"]]
+    assert refreshed["preview"]["post_text"] == "כותרת חדשה 🔥" + preview["post_suffix"]
+
+    assert api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "   "}).status_code == 422
+    assert api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "x", "status": "PUBLISHED"}).status_code == 422
+    assert api.patch("/api/admin/queue/999999", headers=KEY, json={"caption": "x"}).status_code == 404
+
+    published = run_job(api, api.post(f"/api/admin/queue/{first['id']}/publish-now", headers=KEY))
+    assert published["status"] == "SUCCEEDED", published["log"]
+    assert api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "late"}).status_code == 409
+
+    deleted = api.delete(f"/api/admin/queue/{second['id']}", headers=KEY)
+    assert deleted.status_code == 200 and deleted.json()["deleted"] == second["id"]
+
+
+# --------------------------------------------------------------------------- #
+# Generated assets: edit from the preview simulator, delete with orphan-media cleanup
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def media_api(make_settings, monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_API_SECRET", SECRET)
+    app = create_app(make_settings(generated_media_dir=tmp_path / "generated_media"))
+    with TestClient(app) as client:
+        client.ctx = app.state.admin  # type: ignore[attr-defined]
+        yield client
+
+
+def _asset(db, product_id: int, content_type: str, image: str | None, *, status: str = "QUEUED") -> int:
+    platform = content_type.split("_")[0]
+    links = {"affiliate_url": "https://s.click.temu.com/e/x", "storefront_product_url": "https://findhub.example/he/p/1",
+             "storefront_category_url": "https://findhub.example/he/c/gadgets"}
+    if content_type in ("instagram_story", "instagram_reel"):
+        links["story_links"] = [{"kind": "storefront", "label": "FindHub", "url": links["storefront_category_url"]}]
+    return db.insert_generated_asset({
+        "product_id": product_id, "category_id": "gadgets", "language": "he", "platform": platform,
+        "content_type": content_type, "target_account_id": f"gadgets:he:{platform}", "target_account_handle": "@findhub_gadgets_il",
+        "generated_text": "טקסט מקורי #FindHub", "generated_image_path": image,
+        "generated_image_url": None, "links_payload_json": json.dumps(links), "llm_model_used": "test", "status": status,
+    })
+
+
+def test_assets_can_be_edited_until_published(media_api, tmp_path):
+    db = media_api.ctx.engine().db
+    db_engine = media_api.ctx.engine()
+    db_engine.harvester.harvest("gadgets", "temu_mock")
+    product_id = db.query("SELECT id FROM products LIMIT 1")[0]["id"]
+    post = _asset(db, product_id, "instagram_post", None, status="DRAFT")
+    story = _asset(db, product_id, "instagram_story", None)
+
+    response = media_api.patch(f"/api/admin/assets/{post}", headers=KEY, json={"generated_text": "  קפשן חדש  "})
+    assert response.status_code == 200, response.text
+    assert response.json()["generated_text"] == "קפשן חדש" and response.json()["status"] == "DRAFT"
+
+    stickers = [{"kind": "product", "label": "Deal", "url": "https://findhub.example/he/p/9"}]
+    response = media_api.patch(f"/api/admin/assets/{story}", headers=KEY, json={"story_links": stickers})
+    assert response.status_code == 200 and response.json()["links"]["story_links"] == stickers
+    assert response.json()["links"]["affiliate_url"] == "https://s.click.temu.com/e/x"  # the rest of the payload is kept
+
+    bad = [{"kind": "product", "label": "x", "url": "javascript:alert(1)"}]
+    assert media_api.patch(f"/api/admin/assets/{story}", headers=KEY, json={"story_links": bad}).status_code == 422
+    assert media_api.patch(f"/api/admin/assets/{post}", headers=KEY, json={"reel_caption": "x"}).status_code == 422
+    assert media_api.patch(f"/api/admin/assets/{post}", headers=KEY, json={}).status_code == 422
+    assert media_api.patch("/api/admin/assets/999999", headers=KEY, json={"generated_text": "x"}).status_code == 404
+
+    db.mark_generated_asset_published(post, "manual")
+    assert media_api.patch(f"/api/admin/assets/{post}", headers=KEY, json={"generated_text": "late"}).status_code == 409
+
+
+def test_deleting_assets_removes_their_image_only_when_unreferenced(media_api, tmp_path):
+    engine = media_api.ctx.engine()
+    engine.harvester.harvest("gadgets", "temu_mock")
+    product_id = engine.db.query("SELECT id FROM products LIMIT 1")[0]["id"]
+    folder = tmp_path / "generated_media" / "gadgets"
+    folder.mkdir(parents=True)
+    shared, outside = folder / "shared.png", tmp_path / "outside.png"
+    shared.write_bytes(b"png")
+    outside.write_bytes(b"png")
+    first = _asset(engine.db, product_id, "instagram_post", str(shared))
+    second = _asset(engine.db, product_id, "instagram_story", str(shared))
+    stray = _asset(engine.db, product_id, "tiktok_post", str(outside))
+
+    assert media_api.delete(f"/api/admin/assets/{first}", headers=KEY).json() == {"deleted": first, "media_removed": False}
+    assert shared.exists()  # the Story still uses it
+    assert media_api.delete(f"/api/admin/assets/{second}", headers=KEY).json() == {"deleted": second, "media_removed": True}
+    assert not shared.exists()
+    assert media_api.delete(f"/api/admin/assets/{stray}", headers=KEY).json()["media_removed"] is False
+    assert outside.exists()  # never touch files outside the engine's media folders
+    assert engine.db.list_generated_assets() == []
