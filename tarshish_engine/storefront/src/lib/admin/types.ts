@@ -175,3 +175,76 @@ export type Publication = {
   attempts: number;
   created_at: string;
 };
+
+// Generated FindHub assets (GET /api/admin/assets).
+export type AssetStatus = "DRAFT" | "QUEUED" | "PUBLISHED" | "FAILED";
+export type AssetContentType = "telegram_post" | "instagram_post" | "instagram_story" | "instagram_reel" | "tiktok_post";
+
+export type StoryLink = { kind: "storefront" | "product" | "affiliate"; label: string; url: string };
+
+export type AssetLinks = {
+  affiliate_url: string;
+  storefront_product_url: string;
+  storefront_category_url: string;
+  cta:
+    | { kind: "telegram_links"; links: string[] }
+    | { kind: "link_in_bio"; text: string; bio_link: string }
+    | { kind: "link_stickers" };
+  story_links?: StoryLink[];
+  story_links_applied?: boolean;
+  story_links_note?: string;
+  reel_caption?: string;
+  llm_failover?: string[];
+};
+
+export type GeneratedAsset = {
+  id: number;
+  product_id: number;
+  category_id: string;
+  language: string;
+  platform: "telegram" | "instagram" | "tiktok";
+  content_type: AssetContentType;
+  target_account_id: string | null;
+  target_account_handle: string | null;
+  generated_text: string;
+  generated_image_path: string | null;
+  generated_image_url: string | null;
+  llm_model_used: string;
+  status: AssetStatus;
+  platform_post_id: string | null;
+  error_message: string | null;
+  attempts: number;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+  product_title: string;
+  product_title_he: string | null;
+  product_source: string;
+  product_price: number;
+  product_original_price: number | null;
+  product_currency: string;
+  product_rating: number | null;
+  product_orders_count: number | null;
+  product_image_url: string | null;
+  links: AssetLinks;
+  publishing: boolean;
+  publishable: boolean;
+  not_publishable_reason: string | null;
+};
+
+export type FreeLLMLink = {
+  provider: "gemini" | "groq" | "openrouter";
+  model: string;
+  label: string;
+  env_var: string;
+  configured: boolean;
+  cooling_down_seconds: number;
+  last_problem: string | null;
+};
+
+export type AssetsResponse = {
+  items: GeneratedAsset[];
+  counts: Record<AssetStatus, number>;
+  llm_chain: FreeLLMLink[];
+  storefront_base_url: string;
+};

@@ -136,6 +136,9 @@ class GeneratedContent(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     media_local_path: Optional[str] = None
     media_public_url: Optional[str] = None
+    # Fully assembled post text (links, call to action, hashtags, disclosure already in place).
+    # Publishers post it verbatim instead of appending their own link block (generated FindHub assets).
+    final_text: Optional[str] = None
     model_used: str = Field(min_length=1)
     tokens_input: int = Field(default=0, ge=0)
     tokens_output: int = Field(default=0, ge=0)

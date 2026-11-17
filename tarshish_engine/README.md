@@ -165,6 +165,49 @@ Deep links: `?tab=categories`, `?tab=accounts`, `?tab=content`, `?tab=run`. Rest
 editing `.env`. The dashboard has no login: keep it on `localhost` or behind a tunnel. It uses only
 Streamlit's basic widgets plus HTML for tables and bars, so it does not need `pyarrow` to load.
 
+## FindHub live content (generated assets)
+
+Branded copy + images for **real** products only, inspected in the admin before anything is posted.
+
+```bash
+python main.py --generate-assets --category gadgets --lang he                       # every content type, 3 products each
+python main.py --generate-assets --category gadgets --lang en --content-types telegram_post,instagram_post --limit 5
+python main.py --publish-assets 12,13                                                 # publish approved assets now
+```
+
+* **Products:** strictly `source IN ('temu','aliexpress') AND is_mock = 0` (`products.is_mock` flags the
+  `temu_mock` / `aliexpress_mock` demo rows), best sellers first, skipping products that already have an asset
+  of that type in that language (`--force` lifts it).
+* **Copy:** one call per product on the free-tier chain `plugins/generators/free_llm_chain.py` — Gemini
+  (`gemini-2.5-flash`, `gemini-2.0-flash`) ➔ Groq (`llama-3.3-70b-versatile`) ➔ OpenRouter
+  (`meta-llama/llama-3.3-70b-instruct:free`). A 429 / quota error fails over at once and cools that model down;
+  with no key or no quota left the offline templates write the copy. `llm_model_used` records who wrote it.
+  Links and calls to action are assembled in code, never by the model:
+
+  | content type | text | links | image |
+  |---|---|---|---|
+  | `telegram_post` | hook, highlights, price/discount | affiliate URL **and** `{STOREFRONT_BASE_URL}/{lang}/p/{id}` | — (link preview) |
+  | `instagram_post` | caption, emojis, hashtags | none in the caption: localized link-in-bio CTA naming the category | 1080×1350 (4:5) |
+  | `tiktok_post` | short caption, hashtags | link-in-bio CTA | 1080×1920 photo mode |
+  | `instagram_story` / `instagram_reel` | overlay hook (also drawn on the image) | `story_links`: `/{lang}/c/{category}`, `/{lang}/p/{id}`, affiliate | 1080×1920, safe margins |
+
+* **Images:** `plugins/generators/image_composer.py` (Pillow) downloads the product photo and draws the FindHub
+  header pill, the `-NN% OFF` / `HOT DEAL` tag, the `★ 4.9 | 2,400+ Sold` pill, the price shelf label and the
+  `Available on FindHub` bar. Files land in `static/generated_media/` and the API serves them at `/media/...`
+  (the storefront proxies `/media`, so `STOREFRONT_BASE_URL/media/...` is the public URL Meta and TikTok download;
+  `MEDIA_PUBLIC_BASE_URL` or `STORAGE_MODE=supabase` override it).
+* **Storage:** `generated_assets` (product, category, language, platform, content type, target account
+  `<category>:<language>:<platform>` + handle, text, image path/URL, `links_payload_json`, `llm_model_used`,
+  `DRAFT | QUEUED | PUBLISHED | FAILED`). QUEUED when the social account exists, DRAFT otherwise.
+* **Publishing** (admin *Approve & Publish Now*, or `--publish-assets`): Telegram `sendMessage`; Instagram image
+  post / Story via the Graph API; TikTok Direct Post with `media_type=PHOTO` (`PULL_FROM_URL` — the media host
+  must be verified for the TikTok app). Platform limits: Meta's API cannot attach Story **link stickers** (the
+  sticker links stay on the asset; post from the app and use *Posted manually*), and Instagram only accepts
+  **video** for Reels, so static `instagram_reel` assets are refused until video rendering is enabled.
+* **Admin:** *Content & queue* shows every asset as a card — thumbnail with full-resolution lightbox, destination
+  badges (platform, handle, category, language), caption, link preview, model — with *Generate Batch Now*,
+  per-item and bulk publish, Draft/Queue, *Posted manually* and delete.
+
 ## FindHub storefront
 
 A consumer-facing deal catalogue served from the engine's own database. Hebrew (`/he`, right to left,

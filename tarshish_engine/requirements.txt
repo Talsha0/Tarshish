@@ -5,7 +5,8 @@ pydantic>=2.9,<3
 pydantic-settings>=2.6,<3
 ruamel.yaml>=0.18                    # pure-Python YAML: installs on new Python versions without a compiler
 python-dotenv>=1.0
-httpx>=0.27,<1                       # Telegram publisher (sync + async), Supabase Storage uploads
+httpx>=0.27,<1                       # Telegram publisher (sync + async), Supabase Storage uploads, free LLM chain
+Pillow>=10.1                         # FindHub branded promotional images (plugins/generators/image_composer.py)
 tzdata>=2024.1                       # IANA timezones: Windows and slim serverless images ship none
 
 # Database: SQLite is built in; PostgreSQL (Supabase) when DATABASE_URL is set

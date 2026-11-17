@@ -70,7 +70,8 @@ def bootstrap(
 
     setup_logging(log_level or settings.log_level, settings.log_file, console=console_logging)
     register_env_secrets(os.environ)
-    for secret in (settings.anthropic_api_key, settings.gemini_api_key):
+    for secret in (settings.anthropic_api_key, settings.gemini_api_key, settings.groq_api_key,
+                   settings.openrouter_api_key):
         if secret is not None:
             register_secret(secret.get_secret_value())
 

@@ -6,6 +6,7 @@ import { Fragment, useEffect, useState } from "react";
 import { CONTENT_TYPE_LABELS, PLATFORM_LABELS, adminApi, timeAgo } from "@/lib/admin/client";
 import type { Category, Job, Publication, PubStatus } from "@/lib/admin/types";
 
+import { AssetInspector } from "./AssetInspector";
 import { useJobs } from "./jobs";
 import { ErrorNote, Loading, PageHeader, Panel, StatusBadge, useAction, useResource } from "./ui";
 
@@ -188,8 +189,8 @@ export function QueueView() {
   return (
     <>
       <PageHeader
-        title="Publication queue & job history"
-        subtitle="Posts, Stories and videos waiting for the worker, published, or failed — with their generated captions."
+        title="Content inspector, queue & jobs"
+        subtitle="Generated FindHub assets to review and publish, the pipeline's publication queue, and every background job."
         actions={
           <>
             <button type="button" className="adm-btn" onClick={() => void queue.reload()}>
@@ -227,6 +228,9 @@ export function QueueView() {
         }
       />
 
+      <AssetInspector />
+
+      <h2 className="mb-2 text-sm font-semibold">Pipeline publication queue</h2>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="flex rounded-lg border border-adm-line bg-adm-panel p-0.5">
           {STATUSES.map((option) => {

@@ -70,6 +70,8 @@ export const CONTENT_TYPE_LABELS: Record<string, string> = {
   youtube_short: "YouTube Short",
   telegram_post: "Telegram post",
   console_post: "Console preview",
+  instagram_reel: "Instagram Reel",
+  tiktok_post: "TikTok photo post",
 };
 
 export function timeAgo(iso: string | null | undefined): string {

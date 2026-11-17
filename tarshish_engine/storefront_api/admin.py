@@ -21,6 +21,11 @@ same code as the command line, ``main.dispatch``, and record its console output:
     POST /api/admin/actions/import-sqlite    python main.py --import-sqlite FILE
     POST /api/admin/queue/flush              python main.py --flush-queue [--category C --lang L]
     POST /api/admin/queue/retry-failed       python main.py --retry-failed [--category C --lang L]
+    POST /api/admin/assets/generate          python main.py --generate-assets --category C --lang L [--content-types …]
+    POST /api/admin/assets/publish           python main.py --publish-assets ID[,ID…]
+
+Generated FindHub assets (copy + branded image + links) are listed with ``GET /api/admin/assets`` and
+moved between DRAFT and QUEUED, marked as published by hand, or deleted with the routes below it.
 
 Configuration (categories, content profiles, the social-accounts matrix) is edited directly,
 with the same validation as ``config/*.yaml``. Credentials are never accepted: forms take the
@@ -105,7 +110,11 @@ PLATFORM_FIELDS: dict[str, dict[str, Any]] = {
 }
 # Engine-wide variables the overview reports on (names only; values never leave the server).
 CORE_ENV_VARS: dict[str, list[tuple[str, str]]] = {
-    "AI models": [("ANTHROPIC_API_KEY", "Claude models"), ("GEMINI_API_KEY", "Gemini models")],
+    "AI models": [("ANTHROPIC_API_KEY", "Claude models"), ("GEMINI_API_KEY", "Gemini models · free chain #1"),
+                  ("GROQ_API_KEY", "Free chain #2: Groq Llama 3.3 70B"),
+                  ("OPENROUTER_API_KEY", "Free chain #3: OpenRouter free models")],
+    "FindHub links & media": [("STOREFRONT_BASE_URL", "Storefront links in posts and Story stickers"),
+                              ("MEDIA_PUBLIC_BASE_URL", "Public HTTPS origin of /media images (optional)")],
     "Affiliate tracking": [("TEMU_TRACKING_ID", "Temu affiliate links"),
                            ("ALIEXPRESS_TRACKING_ID", "AliExpress affiliate links")],
     "Infrastructure": [("DATABASE_URL", "Supabase PostgreSQL (else local SQLite)"),
@@ -276,6 +285,25 @@ class ReportIn(BaseModel):
 
 class ImportIn(BaseModel):
     path: str = Field(min_length=1, max_length=500)
+
+
+class AssetGenerateIn(BaseModel):
+    category_id: str = Field(min_length=1, max_length=64)
+    language: Literal["he", "en"]
+    content_types: list[Literal["telegram_post", "instagram_post", "instagram_story", "instagram_reel", "tiktok_post"]] = Field(
+        default_factory=lambda: ["telegram_post", "instagram_post", "instagram_story", "instagram_reel", "tiktok_post"],
+        min_length=1,
+    )
+    limit: int = Field(default=3, ge=1, le=20, description="Real products per content type")
+    force: bool = Field(default=False, description="Also products that already have an asset of this type")
+
+
+class AssetPublishIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=50)
+
+
+class AssetStatusIn(BaseModel):
+    status: Literal["DRAFT", "QUEUED"]
 
 
 class QueueScope(BaseModel):
@@ -821,6 +849,110 @@ class AdminService:
     def import_sqlite(self, body: ImportIn) -> dict[str, Any]:
         return self.start_cli_job("import-sqlite", ["--import-sqlite", body.path], body.model_dump())
 
+    # -- generated FindHub assets ------------------------------------------------------- #
+    @staticmethod
+    def present_asset(row: dict[str, Any]) -> dict[str, Any]:
+        import json
+
+        try:
+            links = json.loads(row.get("links_payload_json") or "{}")
+        except ValueError:
+            links = {}
+        try:
+            images = json.loads(row.get("product_image_urls_json") or "[]")
+        except ValueError:
+            images = []
+        publishable, reason = True, None
+        if row["content_type"] == "instagram_reel":
+            publishable, reason = False, ("Instagram publishes Reels from video only; post this 9:16 cover from the "
+                                          "app, or enable video rendering first.")
+        elif not row.get("target_account_id"):
+            publishable, reason = False, f"No {row['platform']} account for {row['category_id']}/{row['language']}."
+        elif row["status"] not in ("QUEUED", "FAILED"):
+            publishable, reason = False, f"Status is {row['status']}."
+        item = {key: value for key, value in row.items()
+                if key not in ("links_payload_json", "product_image_urls_json", "locked_at")}
+        item.update({
+            "links": links, "product_image_url": images[0] if images else None,
+            "publishing": bool(row.get("locked_at")), "publishable": publishable and not row.get("locked_at"),
+            "not_publishable_reason": reason,
+        })
+        return item
+
+    def assets(self, status: str | None, category: str | None, language: str | None, platform: str | None,
+               content_type: str | None, limit: int) -> dict[str, Any]:
+        from core.database import GENERATED_ASSET_STATUSES
+        from plugins.generators.free_llm_chain import FreeLLMChain
+
+        statuses = [s.strip().upper() for s in (status or "").split(",") if s.strip()] or None
+        if statuses and any(s not in GENERATED_ASSET_STATUSES for s in statuses):
+            raise HTTPException(status_code=422, detail=f"status is one of {', '.join(GENERATED_ASSET_STATUSES)}.")
+        rows = self.db.list_generated_assets(statuses=statuses, category=category, language=language,
+                                             platform=platform, content_type=content_type, limit=limit)
+        return {
+            "items": [self.present_asset(row) for row in rows],
+            "counts": self.db.generated_asset_counts(),
+            "llm_chain": FreeLLMChain(self.engine.settings).status(),
+            "storefront_base_url": self.engine.settings.storefront_base_url,
+        }
+
+    def _asset(self, asset_id: int) -> dict[str, Any]:
+        row = self.db.get_generated_asset(asset_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No generated asset #{asset_id}.")
+        return row
+
+    def generate_assets(self, body: AssetGenerateIn) -> dict[str, Any]:
+        self._category(body.category_id)
+        argv = ["--generate-assets", "--category", body.category_id, "--lang", body.language,
+                "--content-types", ",".join(dict.fromkeys(body.content_types)), "--limit", str(body.limit)]
+        if body.force:
+            argv.append("--force")
+        return self.start_cli_job("generate-assets", argv, body.model_dump())
+
+    def publish_assets(self, body: AssetPublishIn) -> dict[str, Any]:
+        ids = list(dict.fromkeys(body.ids))
+        problems = []
+        for asset_id in ids:
+            item = self.present_asset(self._asset(asset_id))
+            if not item["publishable"]:
+                problems.append(f"#{asset_id}: {item['not_publishable_reason'] or 'a publish is already in flight'}")
+        if problems:
+            raise HTTPException(status_code=409, detail="; ".join(problems))
+        return self.start_cli_job("publish-assets", ["--publish-assets", ",".join(map(str, ids))], {"ids": ids})
+
+    def set_asset_status(self, asset_id: int, body: AssetStatusIn) -> dict[str, Any]:
+        row = self._asset(asset_id)
+        if body.status == "QUEUED" and not row.get("target_account_id"):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} has no target account to queue for.")
+        allowed = ("DRAFT", "FAILED") if body.status == "QUEUED" else ("QUEUED", "FAILED")
+        if not self.db.set_generated_asset_status(asset_id, body.status, allowed_from=allowed):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is {row['status']}; it cannot become {body.status}.")
+        return self.present_asset(self._asset(asset_id))
+
+    def mark_asset_published(self, asset_id: int) -> dict[str, Any]:
+        self._asset(asset_id)
+        if not self.db.mark_generated_asset_published(asset_id, "manual"):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is already published or being published.")
+        return self.present_asset(self._asset(asset_id))
+
+    def delete_asset(self, asset_id: int) -> dict[str, Any]:
+        from pathlib import Path
+
+        row = self._asset(asset_id)
+        if not self.db.delete_generated_asset(asset_id):
+            raise HTTPException(status_code=409, detail=f"Asset #{asset_id} is being published right now.")
+        path = row.get("generated_image_path")
+        root = Path(self.engine.settings.generated_media_dir).resolve()
+        if path:
+            try:
+                file = Path(path).resolve()
+                if root in file.parents and file.is_file():
+                    file.unlink()
+            except OSError as exc:
+                logger.warning("Could not remove %s: %s", path, exc)
+        return {"deleted": asset_id}
+
     # -- queue ------------------------------------------------------------------ #
     @staticmethod
     def _pipeline(scope: QueueScope) -> str | None:
@@ -1011,6 +1143,42 @@ def build_router(ctx: AdminContext) -> APIRouter:
         if job is None:
             raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
         return job
+
+    # generated FindHub assets
+    @router.get("/assets")
+    def list_assets(
+        status: str | None = Query(None, max_length=60, description="DRAFT,QUEUED,PUBLISHED,FAILED (comma-separated)"),
+        category: str | None = Query(None, max_length=64),
+        language: str | None = Query(None, max_length=12),
+        platform: str | None = Query(None, max_length=40),
+        content_type: str | None = Query(None, max_length=40),
+        limit: int = Query(100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return service.assets(status, category, language, platform, content_type, limit)
+
+    @router.post("/assets/generate", status_code=202)
+    def generate_assets(body: AssetGenerateIn) -> dict[str, Any]:
+        return service.generate_assets(body)
+
+    @router.post("/assets/publish", status_code=202)
+    def publish_assets(body: AssetPublishIn) -> dict[str, Any]:
+        return service.publish_assets(body)
+
+    @router.post("/assets/{asset_id}/publish", status_code=202)
+    def publish_asset(asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.publish_assets(AssetPublishIn(ids=[asset_id]))
+
+    @router.post("/assets/{asset_id}/status")
+    def set_asset_status(body: AssetStatusIn, asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.set_asset_status(asset_id, body)
+
+    @router.post("/assets/{asset_id}/mark-published")
+    def mark_asset_published(asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.mark_asset_published(asset_id)
+
+    @router.delete("/assets/{asset_id}")
+    def delete_asset(asset_id: int = PathParam(ge=1)) -> dict[str, Any]:
+        return service.delete_asset(asset_id)
 
     # publication queue
     @router.get("/queue")

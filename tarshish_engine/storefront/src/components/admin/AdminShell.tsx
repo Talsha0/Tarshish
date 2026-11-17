@@ -14,7 +14,7 @@ const NAV = [
   { href: "/admin", label: "Overview", icon: Gauge },
   { href: "/admin/accounts", label: "Social accounts", icon: Share2 },
   { href: "/admin/pipelines", label: "Pipelines", icon: Workflow },
-  { href: "/admin/queue", label: "Queue & jobs", icon: ListOrdered },
+  { href: "/admin/queue", label: "Content & queue", icon: ListOrdered },
 ];
 
 type Theme = "system" | "light" | "dark";

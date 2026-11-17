@@ -113,6 +113,19 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY")
     )
     max_monthly_ai_budget_usd: float = Field(default=5.0, ge=0)
+    # Free-tier LLM failover chain (plugins/generators/free_llm_chain.py): Gemini -> Groq -> OpenRouter.
+    # GEMINI_API_KEY above is its first link. Every value is masked as [REDACTED] in all log output.
+    groq_api_key: SecretStr | None = None
+    openrouter_api_key: SecretStr | None = None
+
+    # FindHub links and generated promotional media (plugins/generators/content_generator.py).
+    # STOREFRONT_BASE_URL: the public storefront, e.g. https://findhub.co.il (product pages /{lang}/p/{id}).
+    storefront_base_url: str = "http://localhost:3000"
+    # Where generated images are written; FastAPI serves the folder at /media/... (storefront_api/server.py).
+    generated_media_dir: Path = BASE_DIR / "static" / "generated_media"
+    # Public origin that serves /media/... (Meta and TikTok download images from it, so production needs
+    # HTTPS). Empty = STOREFRONT_BASE_URL, whose Next.js server proxies /media to the API.
+    media_public_base_url: str | None = None
 
     # Storage
     storage_mode: str = "local"
@@ -164,7 +177,30 @@ class Settings(BaseSettings):
     def _normalise_storage_mode(cls, value: str) -> str:
         return value.strip().lower()
 
-    @field_validator("local_media_dir", "database_path", "config_dir", "log_file", mode="after")
+    @field_validator("gemini_api_key", "groq_api_key", "openrouter_api_key", mode="after")
+    @classmethod
+    def _mask_llm_keys(cls, value: SecretStr | None) -> SecretStr | None:
+        """Free-tier LLM keys print as [REDACTED] in every log line, wherever they are echoed."""
+        if value is not None:
+            register_secret(value.get_secret_value().strip())
+        return value
+
+    @field_validator("storefront_base_url", "media_public_base_url", mode="after")
+    @classmethod
+    def _http_origin(cls, value: str | None, info: Any) -> str | None:
+        if value is None or not value.strip():
+            return None if info.field_name == "media_public_base_url" else "http://localhost:3000"
+        value = value.strip().rstrip("/")
+        if not re.fullmatch(r"https?://[^\s/?#]+(/[^\s?#]*)?", value):
+            raise ValueError("must be an http(s) URL such as https://findhub.co.il")
+        return value
+
+    @property
+    def media_base_url(self) -> str:
+        """Origin of the public ``/media/...`` URLs of generated images."""
+        return self.media_public_base_url or self.storefront_base_url
+
+    @field_validator("local_media_dir", "database_path", "config_dir", "log_file", "generated_media_dir", mode="after")
     @classmethod
     def _anchor_to_project_root(cls, value: Path | None) -> Path | None:
         """Relative paths are relative to the project, not to the caller's cwd."""

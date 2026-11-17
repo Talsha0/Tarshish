@@ -53,7 +53,7 @@ from core.resilience import get_logger
 
 logger = get_logger("database")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -188,7 +188,16 @@ PRODUCT_STOREFRONT_COLUMNS: dict[str, str] = {
     "coupon_code": "TEXT",
     "is_flash_sale": "INTEGER NOT NULL DEFAULT 0",
     "stock_urgency_label": "TEXT",                  # e.g. 'Limited Stock', 'Top 1% Deal'
+    "is_mock": "INTEGER NOT NULL DEFAULT 0",        # 1 = offline demo catalogue (temu_mock, aliexpress_mock)
 }
+
+# Stores whose harvested rows are real marketplace offers. Only these feed live content generation.
+REAL_PRODUCT_SOURCES = ("temu", "aliexpress")
+
+
+def is_mock_source(source: str) -> bool:
+    """``temu_mock`` / ``aliexpress_mock`` (and any other ``*mock*`` source) are offline demo data."""
+    return "mock" in source.strip().lower()
 
 # Listing details a caller may set explicitly through ``upsert_product(listing=...)``.
 LISTING_COLUMNS = ("category", "title_he", "coupon_code", "is_flash_sale", "stock_urgency_label")
@@ -229,6 +238,41 @@ CREATE TABLE IF NOT EXISTS job_runs (
 CREATE INDEX IF NOT EXISTS idx_job_runs_created ON job_runs (created_at);
 """
 
+# Schema v5: branded promotional assets (copy + image + links) generated from real products, inspected in
+# the web admin and published on approval. ``target_account_id`` is the social account's key
+# '<category>:<language>:<platform>' (the id the admin API uses; social_accounts has a composite key).
+GENERATED_ASSET_PLATFORMS = ("telegram", "instagram", "tiktok")
+GENERATED_ASSET_CONTENT_TYPES = ("telegram_post", "instagram_post", "instagram_story", "instagram_reel", "tiktok_post")
+GENERATED_ASSET_STATUSES = ("DRAFT", "QUEUED", "PUBLISHED", "FAILED")
+GENERATED_ASSETS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS generated_assets (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id             INTEGER NOT NULL REFERENCES products (id),
+    category_id            TEXT NOT NULL,
+    language               TEXT NOT NULL,
+    platform               TEXT NOT NULL CHECK (platform IN ('telegram', 'instagram', 'tiktok')),
+    content_type           TEXT NOT NULL CHECK (content_type IN ('telegram_post', 'instagram_post', 'instagram_story',
+                                                                 'instagram_reel', 'tiktok_post')),
+    target_account_id      TEXT,                          -- '<category>:<language>:<platform>'; NULL = no account yet
+    target_account_handle  TEXT,
+    generated_text         TEXT NOT NULL,
+    generated_image_path   TEXT,
+    generated_image_url    TEXT,
+    links_payload_json     TEXT NOT NULL DEFAULT '{}',    -- affiliate + FindHub URLs, Story link stickers
+    llm_model_used         TEXT NOT NULL,
+    status                 TEXT NOT NULL CHECK (status IN ('DRAFT', 'QUEUED', 'PUBLISHED', 'FAILED')),
+    platform_post_id       TEXT,
+    error_message          TEXT,
+    attempts               INTEGER NOT NULL DEFAULT 0,
+    locked_at              TEXT,                          -- set while a publish is in flight
+    published_at           TEXT,
+    created_at             TEXT NOT NULL,
+    updated_at             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_generated_assets_status  ON generated_assets (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_generated_assets_product ON generated_assets (product_id, language, content_type);
+"""
+
 # Columns added to configuration tables after their first release (table -> {name: definition}).
 CONFIG_ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "social_accounts": {"platform_metadata_json": "TEXT"},
@@ -262,9 +306,9 @@ _SCHEMA_LOCK_KEY = 7_405_031_117
 # Every table, parents before children (used to copy a database).
 TABLES = (
     "categories", "content_profiles", "social_accounts", "products", "publications",
-    "metrics_snapshots", "ai_usage", "click_events",
+    "metrics_snapshots", "ai_usage", "click_events", "generated_assets",
 )
-_IDENTITY_TABLES = ("products", "publications", "metrics_snapshots", "ai_usage", "click_events")
+_IDENTITY_TABLES = ("products", "publications", "metrics_snapshots", "ai_usage", "click_events", "generated_assets")
 
 
 def is_postgres_url(target: str | os.PathLike[str] | None) -> bool:
@@ -526,6 +570,7 @@ class Database:
             self._migrate(conn)
             conn.executescript(STOREFRONT_SCHEMA)
             conn.executescript(JOBS_SCHEMA)
+            conn.executescript(GENERATED_ASSETS_SCHEMA)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
 
     def _postgres_schema_version(self, conn: Any) -> int:
@@ -638,6 +683,8 @@ class Database:
                     raise
             else:
                 logger.info("Database migration: added products.%s.", name)
+        # Demo rows written before is_mock existed (idempotent, cheap: only rows still flagged 0 are touched).
+        conn.execute("UPDATE products SET is_mock = 1 WHERE is_mock = 0 AND LOWER(source) LIKE '%mock%'")
         legacy = "ni" + "che"  # the pre-v3 name of ``category``
         if legacy in existing:
             rows = conn.execute(f"SELECT id, {legacy} FROM products WHERE category IS NULL OR category = ''").fetchall()
@@ -765,11 +812,12 @@ class Database:
             "title_he": listing.get("title_he"), "coupon_code": listing.get("coupon_code"),
             "is_flash_sale": int(bool(listing.get("is_flash_sale", False))),
             "stock_urgency_label": listing.get("stock_urgency_label"),
+            "is_mock": int(is_mock_source(product.source)),
             "created_at": to_iso(utcnow()),
         }
         refreshed = [
             "canonical_hash", "raw_url", "video_url", "title", "price", "currency", "affiliate_url", "original_price",
-            "discount_percent", "rating", "orders_count", "image_urls_json", *listing,
+            "discount_percent", "rating", "orders_count", "image_urls_json", "is_mock", *listing,
         ]
         updates = [f"{name} = excluded.{name}" for name in refreshed]
         if "category" not in listing:
@@ -1190,6 +1238,164 @@ class Database:
             "WHERE status IN ('QUEUED', 'RUNNING') AND created_at < ?",
             ("Interrupted: the backend process stopped before the job finished.", to_iso(utcnow()), to_iso(older_than)),
         )
+
+    # -- generated promotional assets (plugins/generators/content_generator.py) ------------- #
+    def real_products_for_assets(
+        self, *, category: str, language: str, content_type: str, limit: int = 5, include_handled: bool = False,
+        min_rating: float = 0.0, min_orders: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Real harvested products of ``category`` that have no asset of this type in this language yet.
+
+        Strictly ``source IN ('temu', 'aliexpress') AND is_mock = 0``: the offline demo catalogue
+        (``temu_mock``, ``aliexpress_mock``) never reaches a live account. Best sellers first; the
+        same item harvested from both stores (one ``canonical_hash``) is offered once.
+        """
+        stores = ", ".join("?" for _ in REAL_PRODUCT_SOURCES)
+        exclusion = "" if include_handled else """
+              AND NOT EXISTS (
+                SELECT 1 FROM generated_assets ga JOIN products seen ON seen.id = ga.product_id
+                WHERE seen.canonical_hash = p.canonical_hash AND ga.language = ? AND ga.content_type = ?
+              )"""
+        params: list[Any] = [category_slug(category), *REAL_PRODUCT_SOURCES, min_rating, min_orders]
+        if not include_handled:
+            params += [language, content_type]
+        rows = self.query(
+            f"""
+            SELECT p.* FROM products p
+            WHERE p.category = ? AND p.source IN ({stores}) AND COALESCE(p.is_mock, 0) = 0
+              AND COALESCE(p.rating, 0) >= ? AND COALESCE(p.orders_count, 0) >= ? {exclusion}
+            ORDER BY COALESCE(p.orders_count, 0) DESC, COALESCE(p.rating, 0) DESC, p.id
+            """,
+            params,
+        )
+        picked: list[dict[str, Any]] = []
+        seen_hashes: set[str] = set()
+        for row in rows:
+            if row["canonical_hash"] in seen_hashes or is_mock_source(row["source"]):
+                continue
+            seen_hashes.add(row["canonical_hash"])
+            picked.append(row)
+            if len(picked) >= limit:
+                break
+        return picked
+
+    def insert_generated_asset(self, record: Mapping[str, Any]) -> int:
+        columns = (
+            "product_id", "category_id", "language", "platform", "content_type", "target_account_id",
+            "target_account_handle", "generated_text", "generated_image_path", "generated_image_url",
+            "links_payload_json", "llm_model_used", "status",
+        )
+        values = {name: record.get(name) for name in columns}
+        if values["status"] not in GENERATED_ASSET_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(GENERATED_ASSET_STATUSES)}")
+        now = to_iso(utcnow())
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO generated_assets ({', '.join(columns)}, created_at, updated_at) "
+                f"VALUES ({', '.join(f':{n}' for n in columns)}, :created_at, :updated_at) RETURNING id",
+                {**values, "created_at": now, "updated_at": now},
+            )
+            return int(cursor.fetchone()["id"])
+
+    _ASSET_COLUMNS = (
+        "ga.*, p.title AS product_title, p.title_he AS product_title_he, p.source AS product_source, "
+        "p.price AS product_price, p.original_price AS product_original_price, p.currency AS product_currency, "
+        "p.rating AS product_rating, p.orders_count AS product_orders_count, p.image_urls_json AS product_image_urls_json"
+    )
+
+    def list_generated_assets(
+        self, *, statuses: Sequence[str] | None = None, category: str | None = None, language: str | None = None,
+        platform: str | None = None, content_type: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (("category_id", category), ("language", language), ("platform", platform),
+                              ("content_type", content_type)):
+            if value:
+                clauses.append(f"ga.{column} = ?")
+                params.append(value)
+        if statuses:
+            clauses.append(f"ga.status IN ({', '.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.query(
+            f"SELECT {self._ASSET_COLUMNS} FROM generated_assets ga JOIN products p ON p.id = ga.product_id "
+            f"{where} ORDER BY ga.id DESC LIMIT ?",
+            (*params, limit),
+        )
+
+    def get_generated_asset(self, asset_id: int) -> dict[str, Any] | None:
+        return self.query_one(
+            f"SELECT {self._ASSET_COLUMNS} FROM generated_assets ga JOIN products p ON p.id = ga.product_id "
+            "WHERE ga.id = ?",
+            (asset_id,),
+        )
+
+    def generated_asset_counts(self) -> dict[str, int]:
+        counts = {status: 0 for status in GENERATED_ASSET_STATUSES}
+        for row in self.query("SELECT status, COUNT(*) AS n FROM generated_assets GROUP BY status"):
+            counts[row["status"]] = int(row["n"])
+        return counts
+
+    def claim_generated_asset(self, asset_id: int, stale_after_seconds: int = 900) -> bool:
+        """Atomically lock a QUEUED/FAILED asset for publishing; False when it is not publishable or in flight."""
+        now = utcnow()
+        stale = to_iso(datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=timezone.utc))
+        return self._execute(
+            "UPDATE generated_assets SET locked_at = ?, attempts = attempts + 1, updated_at = ? "
+            "WHERE id = ? AND status IN ('QUEUED', 'FAILED') AND (locked_at IS NULL OR locked_at < ?)",
+            (to_iso(now), to_iso(now), asset_id, stale),
+        ) == 1
+
+    def finish_generated_asset(
+        self, asset_id: int, *, success: bool, platform_post_id: str | None = None, error_message: str | None = None,
+        links_payload_json: str | None = None,
+    ) -> None:
+        now = to_iso(utcnow())
+        if success:
+            self._execute(
+                "UPDATE generated_assets SET status = 'PUBLISHED', platform_post_id = ?, published_at = ?, "
+                "error_message = NULL, locked_at = NULL, updated_at = ?, "
+                "links_payload_json = COALESCE(?, links_payload_json) WHERE id = ?",
+                (platform_post_id, now, now, links_payload_json, asset_id),
+            )
+        else:
+            self._execute(
+                "UPDATE generated_assets SET status = 'FAILED', error_message = ?, locked_at = NULL, updated_at = ? "
+                "WHERE id = ?",
+                ((error_message or "publish failed")[:2000], now, asset_id),
+            )
+
+    def release_generated_asset(self, asset_id: int, error_message: str | None = None) -> None:
+        """Drop the publish lock without changing the status (nothing was sent)."""
+        self._execute(
+            "UPDATE generated_assets SET locked_at = NULL, attempts = MAX(attempts - 1, 0), error_message = ?, "
+            "updated_at = ? WHERE id = ?" if not self.is_postgres else
+            "UPDATE generated_assets SET locked_at = NULL, attempts = GREATEST(attempts - 1, 0), error_message = ?, "
+            "updated_at = ? WHERE id = ?",
+            (error_message, to_iso(utcnow()), asset_id),
+        )
+
+    def set_generated_asset_status(self, asset_id: int, status: str, *, allowed_from: Sequence[str]) -> bool:
+        if status not in GENERATED_ASSET_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(GENERATED_ASSET_STATUSES)}")
+        return self._execute(
+            f"UPDATE generated_assets SET status = ?, updated_at = ?, error_message = NULL "
+            f"WHERE id = ? AND locked_at IS NULL AND status IN ({', '.join('?' for _ in allowed_from)})",
+            (status, to_iso(utcnow()), asset_id, *allowed_from),
+        ) > 0
+
+    def mark_generated_asset_published(self, asset_id: int, note: str | None = None) -> bool:
+        """Manual publication (e.g. a Story posted from the phone to add its link stickers)."""
+        now = to_iso(utcnow())
+        return self._execute(
+            "UPDATE generated_assets SET status = 'PUBLISHED', published_at = ?, platform_post_id = ?, "
+            "error_message = NULL, updated_at = ? WHERE id = ? AND locked_at IS NULL AND status != 'PUBLISHED'",
+            (now, note or "manual", now, asset_id),
+        ) > 0
+
+    def delete_generated_asset(self, asset_id: int) -> bool:
+        return self._execute("DELETE FROM generated_assets WHERE id = ? AND locked_at IS NULL", (asset_id,)) > 0
 
     # -- AI spend ledger ------------------------------------------------------ #
     def record_ai_usage(

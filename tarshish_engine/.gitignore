@@ -22,3 +22,6 @@ __pycache__/
 
 # Vercel CLI
 .vercel/
+
+# Generated FindHub promotional images (served at /media)
+static/generated_media/

@@ -11,6 +11,7 @@ Endpoints
     GET  /api/categories                 active categories with product counts
     POST /api/track-click/{product_id}   log a confirmed outbound click, return the affiliate link
     GET  /api/health                     liveness + number of listed products
+    GET  /media/...                      generated FindHub promotional images (GENERATED_MEDIA_DIR)
     *    /api/admin/...                   the admin control plane (X-Admin-Key; see storefront_api/admin.py)
 
 The API reads and writes the same database as the pipelines and the dashboard: Supabase
@@ -30,6 +31,7 @@ import math
 import os
 import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Request
@@ -347,6 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.catalogue = catalogue
     mount_admin(app, settings)
+    mount_media(app, settings)
 
     # Public catalogue reads may be cached by the CDN in front of the API (Vercel's edge) for a
     # short while; clicks and health checks never are. STOREFRONT_CACHE_SECONDS=0 turns it off.
@@ -360,7 +363,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.method == "GET" and response.status_code == 200 and cache_seconds > 0
             and path.startswith(("/api/products", "/api/categories"))
         )
-        if cacheable:
+        if path.startswith("/media/") and response.status_code == 200:
+            # File names carry a content hash, so a generated image never changes under its URL.
+            response.headers.setdefault("Cache-Control", "public, max-age=86400")
+        elif cacheable:
             response.headers.setdefault(
                 "Cache-Control", f"public, max-age=0, s-maxage={cache_seconds}, stale-while-revalidate={cache_seconds * 5}"
             )
@@ -422,6 +428,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"product_id": product_id, "affiliate_url": affiliate_url, "store": store_for(row["source"])}
 
     return app
+
+
+def mount_media(app: FastAPI, settings: Settings) -> None:
+    """Serve generated promotional images at ``/media/...`` (Meta, TikTok and the admin load them from here)."""
+    from fastapi.staticfiles import StaticFiles
+
+    directory = Path(settings.generated_media_dir)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:  # read-only serverless filesystem: images live in the storage bucket there
+        logger.info("Generated media folder %s is not writable; /media serves nothing on this host.", directory)
+    app.mount("/media", StaticFiles(directory=str(directory), check_dir=False), name="media")
 
 
 _app: FastAPI | None = None

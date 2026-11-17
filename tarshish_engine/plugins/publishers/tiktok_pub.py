@@ -65,11 +65,15 @@ PLUGIN_NAME = "tiktok_pub"
 API_BASE = "https://open.tiktokapis.com"
 CREATOR_INFO_PATH = "/v2/post/publish/creator_info/query/"
 INIT_PATH = "/v2/post/publish/video/init/"
+CONTENT_INIT_PATH = "/v2/post/publish/content/init/"   # photo posts (media_type PHOTO)
 STATUS_PATH = "/v2/post/publish/status/fetch/"
 TOKEN_PATH = "/v2/oauth/token/"
 USER_INFO_PATH = "/v2/user/info/"
 
 CAPTION_LIMIT = 2200                 # UTF-16 code units
+PHOTO_TITLE_LIMIT = 90               # photo posts: short title + long description
+PHOTO_DESCRIPTION_LIMIT = 4000
+PHOTO_FORMATS = ("photo", "image", "carousel")
 MIN_CHUNK = 5 * 1024 * 1024
 MAX_CHUNK = 64 * 1024 * 1024
 DEFAULT_CHUNK = 10 * 1024 * 1024
@@ -105,6 +109,9 @@ _HINTS = {
     "frame_rate_check_failed": "the frame rate is not supported — render at 23–60 fps",
     "picture_size_check_failed": "the resolution is not supported — render 1080x1920 (at least 360 px each side)",
     "internal_error": "TikTok had a server error — the call is retried with backoff",
+    "url_ownership_unverified": ("TikTok only pulls photos from a domain (or URL prefix) verified in the TikTok "
+                                 "Developers Portal (your app > URL properties) — verify the host of "
+                                 "MEDIA_PUBLIC_BASE_URL / STOREFRONT_BASE_URL"),
 }
 _RETRYABLE_CODES = {"rate_limit_exceeded", "internal_error", "spam_risk_too_many_pending_share"}
 
@@ -301,6 +308,8 @@ class TikTokPublisher(BasePublisher):
 
     # -- contract -------------------------------------------------------------------- #
     def publish(self, content: GeneratedContent) -> PublishReceipt:
+        if self.photo_mode(content):
+            return self.publish_photo(content)
         require_video(content, "TikTok")
         caption = self.render_caption(content)
         if self.context.dry_run or self.target.options.get("dry_run"):
@@ -338,6 +347,73 @@ class TikTokPublisher(BasePublisher):
 
         logger.info("TikTok video published to %s (%s).", self.target.page_name, post_id)
         return PublishReceipt(platform=self.platform_name, platform_post_id=post_id, success=True)
+
+    # -- photo mode (Direct Post, media_type PHOTO) ---------------------------------------- #
+    def photo_mode(self, content: GeneratedContent) -> bool:
+        """A page asking for photos, or a still image without a video: post in TikTok's photo mode."""
+        wanted = str(self.target.options.get("content_type") or "").strip().lower()
+        if wanted in PHOTO_FORMATS:
+            return True
+        return (content.content_type != "video" and not content.product.video_url
+                and bool(content.media_public_url) and not str(content.media_public_url).lower().endswith((".mp4", ".mov")))
+
+    def publish_photo(self, content: GeneratedContent) -> PublishReceipt:
+        """Direct Post of the generated 9:16 image: ``POST /v2/post/publish/content/init/`` with PULL_FROM_URL.
+
+        TikTok downloads the photo itself, so it must be a public HTTPS URL on a domain verified for
+        the app; the reply's ``publish_id`` is then polled like a video post.
+        """
+        description = render_post_text(content, max_length=PHOTO_DESCRIPTION_LIMIT,
+                                       disclosure=disclosure_enabled(self.context.settings),
+                                       call_to_action=self._call_to_action(content))
+        first_line = next((line.strip() for line in description.splitlines() if line.strip()), "FindHub")
+        title = first_line if len(first_line) <= PHOTO_TITLE_LIMIT else first_line[:PHOTO_TITLE_LIMIT - 1].rstrip() + "…"
+        photo = str(content.media_public_url or "")
+        if self.context.dry_run or self.target.options.get("dry_run"):
+            logger.info("TikTok photo post simulated (dry-run) for %s — nothing was sent.\n  photo  : %s\n"
+                        "  privacy: %s\n  title  : %s\n  description:\n%s",
+                        self.target.page_name, photo or "none", self._privacy, title, description)
+            return PublishReceipt(
+                platform=self.platform_name, platform_post_id=f"dry-run-{uuid.uuid4().hex[:10]}", success=True
+            )
+        if not photo.lower().startswith("https://"):
+            raise NonRetryableError(
+                f"TikTok photo posts need a public HTTPS image URL (got {photo[:80] or 'none'}) → "
+                f"{_HINTS['url_ownership_unverified']}")
+        if self._brand_content and self._privacy == "SELF_ONLY":
+            raise ConfigError("TikTok does not allow branded content (TIKTOK_COMMERCIAL_CONTENT=branded_content) "
+                              "to be private (TIKTOK_PRIVACY_LEVEL=SELF_ONLY)")
+        with _client(self._transport) as client:
+            token = self._token(client)
+            creator = self._call(client, token, CREATOR_INFO_PATH, {}, "creator_info query")
+            privacy = self._choose_privacy(creator)
+            body = {
+                "post_info": {
+                    "title": title,
+                    "description": description,
+                    "privacy_level": privacy,
+                    "disable_comment": bool(creator.get("comment_disabled")),
+                    "auto_add_music": True,
+                    "brand_content_toggle": self._brand_content,
+                    "brand_organic_toggle": self._brand_organic,
+                },
+                "source_info": {"source": "PULL_FROM_URL", "photo_cover_index": 0, "photo_images": [photo]},
+                "post_mode": "DIRECT_POST",
+                "media_type": "PHOTO",
+            }
+            init = self._call(client, token, CONTENT_INIT_PATH, body, "photo init")
+            publish_id = str(init.get("publish_id") or "")
+            if not publish_id:
+                raise NonRetryableError(f"TikTok photo init returned no publish_id: {redact(str(init))}")
+            logger.info("TikTok photo post started for %s (publish_id %s, %s).", self.target.page_name, publish_id, privacy)
+            post_id = self._await_publish(client, token, publish_id)
+        logger.info("TikTok photo post published to %s (%s).", self.target.page_name, post_id)
+        return PublishReceipt(platform=self.platform_name, platform_post_id=post_id, success=True)
+
+    def _call_to_action(self, content: GeneratedContent) -> str:
+        lang = content.language.split("-")[0]
+        path = f"/c/{category_slug(content.product.category)}"
+        return _CALL_TO_ACTION.get(lang, _CALL_TO_ACTION["en"]).format(path=path)
 
     # -- payload ----------------------------------------------------------------------- #
     def render_caption(self, content: GeneratedContent) -> str:

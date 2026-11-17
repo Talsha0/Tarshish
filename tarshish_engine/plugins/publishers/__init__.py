@@ -35,6 +35,8 @@ def render_post_text(
     is shortened — the link itself is never cut. Platforms whose captions cannot
     carry a clickable link pass ``call_to_action``, which takes the link's place.
     """
+    if content.final_text:
+        return _truncate(content.final_text.strip(), max_length)
     lang = content.language.split("-")[0]
     link = call_to_action or f"{_LINK_LABEL.get(lang, _LINK_LABEL['en'])} {content.product.affiliate_url}"
     tags = " ".join(f"#{tag}" for tag in content.hashtags)
@@ -55,3 +57,16 @@ def render_post_text(
         caption = caption[: max(0, len(caption) - max(overflow, 1) - 1)].rstrip()
         text = assemble(f"{caption}…" if caption else "", with_tags=False)
     return text
+
+
+def _truncate(text: str, max_length: int | None) -> str:
+    """Pre-assembled text cut to the platform limit; whole lines are dropped from the end first."""
+    if max_length is None or utf16_length(text) <= max_length:
+        return text
+    lines = text.split("\n")
+    while len(lines) > 1 and utf16_length("\n".join(lines)) > max_length:
+        lines.pop()
+    text = "\n".join(lines)
+    while text and utf16_length(text) > max_length - 1:
+        text = text[:-1]
+    return text.rstrip() + "…"

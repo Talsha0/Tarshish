@@ -53,7 +53,7 @@ def test_domain_models_expose_exactly_the_specified_fields():
     assert Product.model_fields["currency"].default == "ILS"
     assert list(GeneratedContent.model_fields) == [
         "product", "content_type", "content_format", "language", "caption", "hashtags", "media_local_path", "media_public_url",
-        "model_used", "tokens_input", "tokens_output", "generation_cost_usd",
+        "final_text", "model_used", "tokens_input", "tokens_output", "generation_cost_usd",
     ]
     assert typing.get_args(GeneratedContent.model_fields["content_type"].annotation) == ("text", "video")
     assert list(PublishReceipt.model_fields) == [
@@ -312,7 +312,7 @@ def test_every_third_party_import_is_declared_in_requirements():
         "streamlit": "streamlit", "pytest": "pytest", "fastapi": "fastapi", "rapidfuzz": "rapidfuzz",
         "psycopg": "psycopg", "psycopg_pool": "psycopg-pool", "googleapiclient": "google-api-python-client",
         "google_auth_httplib2": "google-auth-httplib2", "google_auth_oauthlib": "google-auth-oauthlib",
-        "httplib2": "httplib2",
+        "httplib2": "httplib2", "PIL": "Pillow",
     }
     local = {"core", "plugins", "storage", "dashboard", "storefront_api", "api", "main", "tests", "conftest", "index"}
     imported: set[str] = set()

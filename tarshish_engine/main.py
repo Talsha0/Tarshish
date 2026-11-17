@@ -90,6 +90,16 @@ def _content_types(value: str) -> list[str]:
     return names
 
 
+def _id_list(value: str) -> list[int]:
+    try:
+        ids = [int(part) for part in value.split(",") if part.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError("asset ids are numbers separated by commas, e.g. 12,13") from None
+    if not ids or any(i < 1 for i in ids):
+        raise argparse.ArgumentTypeError("name at least one asset id, e.g. 12")
+    return list(dict.fromkeys(ids))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -103,6 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stage 1: fetch products per (category, source) into SQLite — once, for every language")
     stages.add_argument("--publish", action="store_true",
                         help="Stage 2: generate and publish content for harvested products per (category, language)")
+    stages.add_argument("--generate-assets", action="store_true",
+                        help="FindHub live content: copy (free LLM chain) + branded images for REAL products "
+                             "(temu/aliexpress, never mock) into generated_assets; needs --category and --lang; "
+                             "--content-types picks from telegram_post, instagram_post, instagram_story, "
+                             "instagram_reel, tiktok_post")
+    stages.add_argument("--publish-assets", type=_id_list, metavar="IDS",
+                        help="publish generated assets now through their platform publishers, e.g. 12,13")
 
     scope = parser.add_argument_group("scope")
     scope.add_argument("--category", metavar="ID", help="category id (default: every enabled category)")
@@ -168,6 +185,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     seeding = args.seed_temu or args.seed_aliexpress
+    if args.generate_assets or args.publish_assets:
+        if args.generate_assets and args.publish_assets:
+            parser.error("run --generate-assets and --publish-assets separately (review the assets in between)")
+        if args.harvest or args.publish or args.mode or args.dry_run or args.source:
+            parser.error("--generate-assets / --publish-assets cannot be combined with --harvest, --publish, --mode, "
+                         "--dry-run or --source")
+        if args.generate_assets and not (args.category and args.lang):
+            parser.error("--generate-assets needs --category ID and --lang he|en")
+        if args.generate_assets and args.lang not in ("he", "en"):
+            parser.error("--generate-assets writes Hebrew or English copy: --lang he or --lang en")
+        if args.publish_assets and (args.category or args.lang or args.content_types or args.force or args.limit):
+            parser.error("--publish-assets takes asset ids only")
+        return
     if args.harvest and args.publish:
         parser.error("run --harvest and --publish separately: they are independent stages")
     if args.mode == "worker" and (args.harvest or args.publish or args.dry_run or args.limit or args.force):
@@ -473,6 +503,38 @@ def run_publish(engine, args) -> int:
     return exit_code
 
 
+def run_generate_assets(engine, args) -> int:
+    from plugins.generators.content_generator import ContentGenerator
+
+    report = ContentGenerator(engine).generate_batch(
+        args.category, args.lang, args.content_types, limit=args.limit or 3, force=args.force, progress=print,
+    )
+    print()
+    for line in report.lines():
+        print(line)
+    return EXIT_OK if report.created or not report.count("skipped") else EXIT_FAILURES
+
+
+def run_publish_assets(engine, args) -> int:
+    from plugins.generators.content_generator import AssetPublishError, ContentGenerator
+
+    generator = ContentGenerator(engine)
+    failed = False
+    for asset_id in args.publish_assets:
+        try:
+            outcome = generator.publish_asset(asset_id)
+        except AssetPublishError as exc:
+            print(f"✗ #{asset_id} not published: {exc}")
+            failed = True
+            continue
+        if outcome.success:
+            print(f"✓ #{asset_id} {outcome.message} (post id {outcome.platform_post_id}).")
+        else:
+            print(f"✗ #{asset_id} failed: {outcome.message}")
+            failed = True
+    return EXIT_FAILURES if failed else EXIT_OK
+
+
 def run_worker(engine, args) -> int:
     worker = engine.create_worker()
     if args.once:
@@ -536,6 +598,10 @@ def dispatch(engine, args: argparse.Namespace, parser: argparse.ArgumentParser |
             return run_harvest(engine, args)
         if args.publish:
             return run_publish(engine, args)
+        if args.generate_assets:
+            return run_generate_assets(engine, args)
+        if args.publish_assets:
+            return run_publish_assets(engine, args)
         if args.mode == "worker":
             return run_worker(engine, args)
 

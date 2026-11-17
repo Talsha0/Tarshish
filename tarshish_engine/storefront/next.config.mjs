@@ -5,6 +5,8 @@
 //
 //   /api/backend/:path*  -> BACKEND_API_URL/api/:path*   public API (products, categories, clicks)
 //   /api/:path*          -> BACKEND_API_URL/api/:path*   the same, the storefront's original paths
+//   /media/:path*        -> BACKEND_API_URL/media/:path*  generated FindHub promotional images (public, so Meta
+//                           and TikTok can download them from the storefront's own HTTPS domain)
 //   /api/backend/admin/* -> src/app/api/backend/admin/[...path]/route.ts — NOT a plain rewrite: that
 //                           route checks the admin session cookie and adds the X-Admin-Key header on
 //                           the server, so ADMIN_API_SECRET never reaches a browser.
@@ -59,6 +61,7 @@ const nextConfig = {
     return [
       { source: "/api/backend/:path((?!admin(?:/|$)).*)", destination: `${BACKEND}/api/:path` },
       { source: "/api/:path((?!backend(?:/|$)|admin(?:/|$)).*)", destination: `${BACKEND}/api/:path` },
+      { source: "/media/:path*", destination: `${BACKEND}/media/:path*` },
     ];
   },
 };
