@@ -147,7 +147,7 @@ def test_database_is_seeded_once_then_is_the_source_of_truth(engine, make_settin
     engine.registry.save_category(sports.model_copy(update={"enabled": False}))
     again = bootstrap(settings=make_settings(), console_logging=False)  # restart: YAML must not overwrite the DB
     assert again.registry.get_category("sports").enabled is False
-    assert again.registry.sync_from_yaml() == {"categories": 3, "content_profiles": 5, "social_accounts": 5}
+    assert again.registry.sync_from_yaml() == {"categories": 3, "content_profiles": 6, "social_accounts": 7}
     assert again.registry.get_category("sports").enabled is True
 
 

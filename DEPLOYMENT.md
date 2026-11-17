@@ -188,13 +188,15 @@ variable (e.g. `INSTAGRAM_ACCESS_TOKEN_SPORTS_EN`) only needs a new secret here.
 | `TEMU_TRACKING_ID`, `ALIEXPRESS_TRACKING_ID` | for affiliate links | |
 | `ANTHROPIC_API_KEY` and/or `GEMINI_API_KEY` | for AI captions | without them, offline templates |
 | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID`, `…_GADGETS_EN`, `TG_*` … | per account | the names in the Social Accounts matrix |
+| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` (+ `…_GADGETS_EN`) | for YouTube Shorts | OAuth refresh token per channel, `youtube.upload` scope |
+| `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN_*`, `TIKTOK_REFRESH_TOKEN_*` | for TikTok | the refresh token keeps the 24-hour access token fresh on scheduled runs |
 | `STORAGE_MODE=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | for videos / Stories | step 1.5 |
 | `VIDEO_RENDER_ENABLED=true` | for rendered videos | the workflow then installs ffmpeg |
 | `MAX_MONTHLY_AI_BUDGET_USD`, `PUBLISHING_MODE`, `PUBLISH_BATCH_LIMIT`, `HARVEST_LIMIT`, `WORKER_*` | no | defaults as in `.env.example` |
 
 Then, in the **Actions** tab:
 
-1. Open **Engine** → **Run workflow** → job `verify-instagram` to check the Instagram accounts.
+1. Open **Engine** → **Run workflow** → job `verify-instagram` (and `verify-youtube`, `verify-tiktok`) to check the accounts.
 2. Run `harvest`, then `publish` with **dry run** ticked to preview the posts in the log.
 3. Run `publish` for real; the hourly `worker` takes it from there.
 

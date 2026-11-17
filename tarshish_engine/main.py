@@ -9,6 +9,7 @@ Stage 1 · harvest (language-agnostic, per category × source, no LLM)
 
 Stage 2 · publish (per category × language × content types, reads harvested products)
     python main.py --publish --category gadgets --lang he --content-types instagram_post,instagram_story
+    python main.py --publish --category gadgets --lang he --content-types youtube_short,tiktok_video
     python main.py --publish --category gadgets --lang en --dry-run    # simulate: no posts, no paid LLM, no writes
     python main.py --publish --category gadgets                        # every language with an enabled account
     python main.py --mode worker                                       # publish the queue with human-like pacing
@@ -22,6 +23,8 @@ Management
     python main.py --seed-storefront    # load the storefront demo catalogue
     python main.py --seed-temu --category gadgets --keyword "smart watch" --limit 10   # ad-hoc keyword harvest
     python main.py --verify-instagram [--category gadgets --lang he]   # read-only Instagram connection check
+    python main.py --verify-youtube [--category gadgets --lang he]     # OAuth refresh + youtube.upload scope check
+    python main.py --verify-tiktok [--category gadgets --lang he]      # token + Direct Post permission check
     python main.py --import-sqlite tarshish_engine.db   # copy a local SQLite database into DATABASE_URL (Supabase)
 """
 
@@ -146,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--verify-instagram", action="store_true",
                         help="check the Instagram accounts of the matrix (token, professional account, publishing "
                              "permissions) with read-only calls; --category / --lang narrow it")
+    manage.add_argument("--verify-youtube", action="store_true",
+                        help="check the YouTube channels of the matrix (OAuth refresh token, youtube.upload scope, "
+                             "daily quota) with read-only calls; --category / --lang narrow it")
+    manage.add_argument("--verify-tiktok", action="store_true",
+                        help="check the TikTok accounts of the matrix (user access token, Direct Post permission, "
+                             "privacy levels) with read-only calls; --category / --lang narrow it")
     manage.add_argument("--import-sqlite", metavar="FILE",
                         help="copy everything from a local SQLite database file into the configured "
                              "DATABASE_URL (PostgreSQL / Supabase), keeping ids")
@@ -168,10 +177,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--source only applies to --harvest")
     if (args.content_types or args.force) and not args.publish:
         parser.error("--content-types and --force only apply to --publish")
-    if args.lang and not (args.publish or args.verify_instagram or args.flush_queue or args.retry_failed
-                          or args.stats):
-        parser.error("--lang applies to --publish (and narrows --verify-instagram, --flush-queue, --retry-failed, "
-                     "--stats)")
+    verifying = args.verify_instagram or args.verify_youtube or args.verify_tiktok
+    if args.lang and not (args.publish or verifying or args.flush_queue or args.retry_failed or args.stats):
+        parser.error("--lang applies to --publish (and narrows --verify-instagram/--verify-youtube/--verify-tiktok, "
+                     "--flush-queue, --retry-failed, --stats)")
     if args.seed_temu and args.seed_aliexpress:
         parser.error("run --seed-temu and --seed-aliexpress separately (they share --category/--keyword/--limit)")
     if seeding:
@@ -186,8 +195,9 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     elif args.keyword or args.job:
         parser.error("--keyword and --job only apply to --seed-temu / --seed-aliexpress "
                      "(--harvest uses the category's stored search rules)")
-    if args.verify_instagram and (args.dry_run or args.mode or args.limit or args.force):
-        parser.error("--verify-instagram only reads from the API; it takes --category / --lang and nothing else")
+    if verifying and (args.dry_run or args.mode or args.limit or args.force or args.harvest or args.publish):
+        parser.error("--verify-instagram / --verify-youtube / --verify-tiktok only read from the APIs; "
+                     "they take --category / --lang and nothing else")
 
 
 # --------------------------------------------------------------------------- #
@@ -357,6 +367,41 @@ def cmd_verify_instagram(engine, category: str | None, language: str | None) -> 
     return ready
 
 
+# Short-form video platforms: platform -> (plugin module, report title, setup_roadmap.html section)
+_VIDEO_CHECKS = {
+    "youtube": ("plugins.publishers.youtube_pub", "YouTube Data API v3 (Shorts) · OAuth check",
+                'section A of "Short-Form Video APIs Setup (YouTube Shorts & TikTok)"'),
+    "tiktok": ("plugins.publishers.tiktok_pub", "TikTok Content Posting API (Direct Post) · token check",
+               'section B of "Short-Form Video APIs Setup (YouTube Shorts & TikTok)"'),
+}
+
+
+def cmd_verify_video(engine, platform: str, category: str | None, language: str | None) -> bool:
+    """Print a read-only connection report for each YouTube / TikTok account; True when all are ready."""
+    import importlib
+
+    module_name, title, section = _VIDEO_CHECKS[platform]
+    module = importlib.import_module(module_name)
+    pages = module.pages_to_verify(engine.registry, category, language)
+    print(_RULE)
+    scope = "/".join(part for part in (category, language) if part) or "configured accounts"
+    print(f" {title} · {scope} · nothing is posted")
+    if not pages:
+        print(f"   ! No {platform} account is configured for {scope} (Social Accounts tab / config/social_accounts.yaml).")
+        print(_RULE)
+        return False
+    results = module.verify_pages(engine.registry, pages)
+    for result in results:
+        print(f"   {'✓' if result.ok else '✗'} {result.page_name}: {result.summary()}")
+        for line in result.lines():
+            print(f"       {line}")
+    ready = bool(results) and all(result.ok for result in results)
+    print(" Ready for live publishing." if ready else
+          f" Not ready: fix the ✗ items above (see setup_roadmap.html, {section}).")
+    print(_RULE)
+    return ready
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -483,6 +528,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify_instagram:
             management = True
             failed = not cmd_verify_instagram(engine, args.category, args.lang)
+        for platform, wanted in (("youtube", args.verify_youtube), ("tiktok", args.verify_tiktok)):
+            if wanted:
+                management = True
+                failed = (not cmd_verify_video(engine, platform, args.category, args.lang)) or failed
         if args.sync_config:
             management = True
             counts = engine.registry.sync_from_yaml()

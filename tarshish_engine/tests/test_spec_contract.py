@@ -82,7 +82,8 @@ def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
     # _mock_catalogue is data, not a plugin
     assert engine.plugins.names("source") == ["aliexpress_mock", "aliexpress_rapidapi", "temu_mock", "temu_rapidapi"]
     assert engine.plugins.names("generator") == ["ffmpeg_video_gen", "llm_story_gen", "llm_text_gen"]
-    assert engine.plugins.names("publisher") == ["console_pub", "instagram_pub", "telegram_pub"]
+    assert engine.plugins.names("publisher") == [
+        "console_pub", "instagram_pub", "telegram_pub", "tiktok_pub", "youtube_pub"]
     assert engine.plugins.names("storage") == ["cloud", "local", "supabase"]
     assert engine.plugins.load_errors == {}
     # core/ must not name a concrete plugin module (the dry-run publisher is a setting, not an import).
@@ -309,7 +310,9 @@ def test_every_third_party_import_is_declared_in_requirements():
         "pydantic": "pydantic", "pydantic_settings": "pydantic-settings", "ruamel": "ruamel.yaml",
         "dotenv": "python-dotenv", "httpx": "httpx", "anthropic": "anthropic", "google": "google-genai",
         "streamlit": "streamlit", "pytest": "pytest", "fastapi": "fastapi", "rapidfuzz": "rapidfuzz",
-        "psycopg": "psycopg", "psycopg_pool": "psycopg-pool",
+        "psycopg": "psycopg", "psycopg_pool": "psycopg-pool", "googleapiclient": "google-api-python-client",
+        "google_auth_httplib2": "google-auth-httplib2", "google_auth_oauthlib": "google-auth-oauthlib",
+        "httplib2": "httplib2",
     }
     local = {"core", "plugins", "storage", "dashboard", "storefront_api", "api", "main", "tests", "conftest", "index"}
     imported: set[str] = set()

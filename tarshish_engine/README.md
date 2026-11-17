@@ -131,6 +131,8 @@ Then open <http://localhost:3000> (it redirects to the Hebrew storefront, `/he`)
 | `python main.py --seed-storefront` | Load the 14-product demo catalogue into the storefront (an upsert; safe to repeat). |
 | `python main.py --seed-temu --category gadgets --keyword "smart watch" --limit 10` | An ad-hoc harvest from `temu_rapidapi` that overrides the category's keyword for one run (filters against the storefront standard). Add `--job ID` to collect an earlier background search. `--seed-aliexpress` does the same for AliExpress. Both exit 1 when no provider delivers. |
 | `python main.py --verify-instagram [--category C --lang L]` | Read-only check of the matrix's Instagram accounts. |
+| `python main.py --verify-youtube [--category C --lang L]` | Read-only YouTube check: refreshes the OAuth token, confirms `youtube.upload`, shows the daily quota budget. |
+| `python main.py --verify-tiktok [--category C --lang L]` | Read-only TikTok check: access token (refreshed when possible), Direct Post permission, allowed privacy levels. |
 
 Other flags: `--limit N` (harvest: products kept per category and source; publish: products per content
 type), `--force` (ignore de-duplication), `--log-level`. Exit codes: `0` ok, `1` failures,
@@ -400,6 +402,40 @@ with `instagram_business_basic` and `instagram_business_content_publish`. Creden
   checks the token (`/debug_token`, falling back to `/me/permissions`), the account type and both
   permissions with read-only calls, and prints `Connected as @user | BUSINESS | Permissions: ✓ … ✓ …`.
 
+### YouTube Shorts publisher (`youtube_pub`)
+
+Uploads through the **YouTube Data API v3** (`videos.insert`, `part=snippet,status`) as a chunked **resumable
+upload**, so a dropped connection resumes instead of starting over. OAuth 2.0: `YOUTUBE_CLIENT_ID` /
+`YOUTUBE_CLIENT_SECRET` plus a refresh token per channel (`YOUTUBE_REFRESH_TOKEN`, or the account's
+`token_env_var`), exchanged for an access token at each upload. Generate one with
+`python -m plugins.publishers.youtube_pub --authorize client_secret.json` (`google-auth-oauthlib`).
+
+* Title = first caption line + `#Shorts` (≤ 100 characters); description = caption, affiliate link, hashtags,
+  disclosure and `#Shorts`. Category 28 (Science & Technology) for tech collections, otherwise 22 (People &
+  Blogs); override with `YOUTUBE_CATEGORY_ID`. `YOUTUBE_PRIVACY_STATUS` = public | unlisted | private.
+* Each upload costs 1,600 quota units (default quota 10,000 a day ➔ 6 uploads). The publisher stops at
+  `YOUTUBE_DAILY_QUOTA_UNITS` and, after `quotaExceeded`, skips further uploads until midnight Pacific time.
+* Token refresh failures say what to do (`invalid_grant` ➔ a revoked token, or a consent screen still in
+  Testing, whose tokens expire after 7 days).
+
+### TikTok publisher (`tiktok_pub`)
+
+**Content Posting API — Direct Post** (`open.tiktokapis.com`): `creator_info/query` ➔ `video/init`
+(`post_info` + `FILE_UPLOAD` `source_info`) ➔ chunked `PUT` to the returned `upload_url` ➔ `status/fetch` until
+`PUBLISH_COMPLETE`. The user access token (`TIKTOK_ACCESS_TOKEN`, or the account's `token_env_var`) lasts 24 hours;
+with `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` and a refresh token (`TIKTOK_REFRESH_TOKEN`, or the account's
+`account_id_env_var`) it is refreshed before each post.
+
+* The caption ends with `🔗 Link in bio -> /c/<category>` (TikTok captions carry no clickable link).
+* `TIKTOK_PRIVACY_LEVEL` must be one the creator allows; unaudited apps can only post `SELF_ONLY`.
+  `TIKTOK_COMMERCIAL_CONTENT` = none | your_brand | branded_content sets the disclosure toggles.
+* Calls are paced under TikTok's 6 requests per minute per token and back off on `rate_limit_exceeded`; errors
+  carry TikTok's `log_id` and a next step (`unaudited_client_can_only_post_to_private_accounts`,
+  `access_token_invalid`, `spam_risk_too_many_posts`…).
+
+Both video publishers need a real MP4 (`VIDEO_RENDER_ENABLED=true` + ffmpeg, or a source video; a stored copy
+is downloaded first) and check it with `ffprobe` before uploading: vertical 9:16 and at most 60 seconds.
+
 ## Resilience
 
 * **AI budget guardrail** — before every paid LLM call the month-to-date spend is checked; at
@@ -482,6 +518,7 @@ TARSHISH_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgre
 | `test_config.py`, `test_resilience.py` | The three seed files, validation, secret rejection, round trips, seed-once semantics, redaction, retries, budget guard |
 | `test_dashboard.py` | The Streamlit app end to end: four tabs, Harvest Now, the category / account / content-type forms, the run form, queue actions, storefront clicks, and rendering without `pyarrow` |
 | `test_storefront.py` | Schema migration, the seeder, search (typos, Hebrew), every API endpoint, click tracking, click metrics |
+| `test_video_publishers.py` | YouTube Shorts (resumable chunks, `#Shorts` metadata, quota, token refresh, resume after 5xx, verify) and TikTok Direct Post (init/upload/status, chunk plan, token refresh, unaudited and rate-limit errors, verify) against mocked Google / TikTok endpoints; the CLI flags |
 | `test_instagram_publisher.py` | Instagram Unified Login: feed image, Reel backoff, Story image/video (no caption), Meta error hints, `--verify-instagram` and the dashboard button |
 | `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), gadgets harvested once and published per language, posts and Stories with their own models |
 | `test_temu_failover.py` | Temu provider chain: the 429 ➔ empty ➔ success failover, every failure mode, key fallback and exhausted-key memory, the four adapters, chain-file validation, key masking, the CLI summary |

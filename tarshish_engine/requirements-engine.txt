@@ -5,5 +5,12 @@
 anthropic>=2.8,<3
 google-genai>=3.0,<4
 
+# YouTube Shorts publisher (plugins/publishers/youtube_pub.py): YouTube Data API v3 + OAuth 2.0
+google-api-python-client>=2.100,<3
+google-auth>=2.29,<3
+google-auth-httplib2>=0.2,<1
+httplib2>=0.20,<1
+google-auth-oauthlib>=1.2,<2           # one-off refresh-token generation (python -m plugins.publishers.youtube_pub)
+
 # Local storefront API server (on Vercel the platform serves api/index.py itself)
 uvicorn>=0.30,<1

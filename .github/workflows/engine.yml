@@ -25,7 +25,7 @@ on:
       job:
         description: What to run
         type: choice
-        options: [worker, harvest, publish, stats, retry-failed, verify-instagram, sync-config, seed-storefront]
+        options: [worker, harvest, publish, stats, retry-failed, verify-instagram, verify-youtube, verify-tiktok, sync-config, seed-storefront]
         default: worker
       category:
         description: "Category id (optional, e.g. gadgets)"
@@ -93,6 +93,8 @@ jobs:
             stats)            args=(--stats) ;;
             retry-failed)     args=(--retry-failed) ;;
             verify-instagram) args=(--verify-instagram) ;;
+            verify-youtube)   args=(--verify-youtube) ;;
+            verify-tiktok)    args=(--verify-tiktok) ;;
             sync-config)      args=(--sync-config) ;;
             seed-storefront)  args=(--seed-storefront) ;;
             *) echo "::error::unknown job $JOB"; exit 2 ;;

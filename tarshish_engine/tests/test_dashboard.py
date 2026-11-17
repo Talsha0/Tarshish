@@ -116,8 +116,9 @@ def test_accounts_matrix_shows_languages_side_by_side_and_refuses_raw_tokens(das
     app, db = dashboard
     matrix = next(block.value for block in app.markdown if "Hebrew (he)" in block.value and "gadgets_en" in block.value)
     assert matrix.index("Hebrew (he)") < matrix.index("English (en)")
-    assert "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN" in matrix and "no tiktok_pub plugin" not in matrix  # tiktok: disabled
-    assert "⏸ @gadgets.il · disabled" in matrix and "⚠️ gadgets · environment variable" in matrix
+    assert "INSTAGRAM_ACCESS_TOKEN_GADGETS_EN" in matrix and "no tiktok_pub plugin" not in matrix
+    assert "⚠️ @gadgets.il · environment variable &#x27;TIKTOK_ACCESS_TOKEN_GADGETS_HE" in matrix  # plugin installed
+    assert "⚠️ gadgets · environment variable" in matrix and "YOUTUBE_REFRESH_TOKEN" in matrix
 
     app.selectbox(key="acc_category").set_value("sports").run()
     app.selectbox(key="acc_language").set_value("en").run()
@@ -153,10 +154,10 @@ def test_content_types_get_their_model_from_one_place(dashboard):
     assert (row["llm_model"], row["tone"], row["generator"], row["publish_format"]) == (
         "gemini-3.5-flash-lite", "bold and short", "llm_story_gen", "story")
 
-    app.text_input(key="pf_type_new").set_value("youtube_short")
+    app.text_input(key="pf_type_new").set_value("pinterest_pin")
     app.text_input(key="pf_platform_new").set_value("Not a platform!")
     app.button(key="FormSubmitter:profile_form_new-Add content type").click().run()
-    assert any("not valid" in error.value for error in app.error) and not db.get_config("content_profiles", "youtube_short")
+    assert any("not valid" in error.value for error in app.error) and not db.get_config("content_profiles", "pinterest_pin")
 
 
 def test_queue_tab_retries_failed_items_and_flushes_the_queue(dashboard, capsys):

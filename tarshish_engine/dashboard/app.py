@@ -485,7 +485,7 @@ def render_account_form(engine: Engine, categories: list[CategoryConfig], langua
                 st.rerun()
 
 
-def render_accounts_tab(engine: Engine) -> None:
+def render_accounts_tab(engine: Engine, metrics: MetricsService | None = None) -> None:
     categories = engine.registry.list_categories()
     languages = engine.registry.languages()
     platforms = platforms_of(engine)
@@ -495,6 +495,7 @@ def render_accounts_tab(engine: Engine) -> None:
     render_matrix(engine, categories, languages, platforms)
     if any(account.platform == "instagram" for account in engine.registry.list_social_accounts()):
         render_instagram_connection(engine)
+    render_video_platforms(engine, metrics or MetricsService(engine.db, engine.settings))
     st.divider()
     render_account_form(engine, categories, languages, platforms)
 
@@ -663,7 +664,7 @@ def render_run_form(engine: Engine) -> None:
         st.info("Add a category and a content type first.")
         return
     languages = engine.registry.languages()
-    preferred = [name for name in ("instagram_post", "instagram_story") if name in profiles]
+    preferred = [name for name in ("instagram_post", "instagram_story") if name in profiles]  # video types: opt in
     with st.form("run_form", border=True):
         cols = st.columns([1.2, 1, 2.6])
         category = cols[0].selectbox("Category", categories, key="run_category")
@@ -804,6 +805,92 @@ def render_instagram_connection(engine: Engine) -> None:
             show = st.success if result["ok"] else st.error
             show(f"{result['page']}: {redact(result['summary'])}")
             st.code(redact("\n".join(result["lines"])), language=None)
+
+
+# Short-form video APIs: platform -> (publisher plugin, card title, verification hint)
+VIDEO_PLATFORMS = {
+    "youtube": ("youtube_pub", "YouTube Shorts · Data API v3", "OAuth refresh + youtube.upload scope"),
+    "tiktok": ("tiktok_pub", "TikTok · Content Posting API (Direct Post)", "access token + video.publish"),
+}
+
+
+def percent(value: float | None) -> str:
+    return "—" if value is None else f"{value:.0%}"
+
+
+def credential_rows(engine: Engine, platform: str, publisher: str) -> list[dict[str, Any]]:
+    """Which env vars each account of ``platform`` needs and whether they are set — never the values."""
+    rows: list[dict[str, Any]] = []
+    if not engine.plugins.has("publisher", publisher):
+        return rows
+    cls = engine.plugins.get("publisher", publisher)
+    for account in engine.registry.list_social_accounts(platform=platform):
+        refs = {**cls.default_env_vars, **engine.registry.social_page(account).env_refs()}
+        marks = []
+        for credential, env_name in refs.items():
+            present = bool(os.getenv(env_name, "").strip())
+            required = credential in cls.required_credentials
+            marks.append(f"{'✓' if present else ('✗' if required else '·')} {env_name}")
+        icon, text = account_status(engine, account)
+        rows.append({"account": f"{account.account_handle} ({account.category_id}/{account.language})",
+                     "env": " · ".join(marks), "status": f"{icon} {text}"})
+    return rows
+
+
+def render_video_platforms(engine: Engine, metrics: MetricsService) -> None:
+    """Credential detection, delivery success rates and a read-only connection test for YouTube and TikTok."""
+    accounts = {account.platform for account in engine.registry.list_social_accounts()}
+    shown = [platform for platform in VIDEO_PLATFORMS if platform in accounts]
+    if not shown:
+        return
+    st.markdown("**Short-form video APIs**")
+    columns = st.columns(len(shown))
+    for column, platform in zip(columns, shown):
+        publisher, title, checks = VIDEO_PLATFORMS[platform]
+        with column.container(border=True):
+            st.markdown(f"**{title}**")
+            rows = credential_rows(engine, platform, publisher)
+            ready = sum(1 for row in rows if row["status"].startswith("✅"))
+            health = metrics.get_upload_health(publisher)
+            tiles = st.columns(3)
+            tiles[0].metric("Credentials", f"{ready}/{len(rows)}", border=True,
+                            help="Accounts whose required .env variables are all set")
+            tiles[1].metric("Last run", percent(health["last_run_success_rate"]), border=True,
+                            help=f"{health['last_run_published']} of {health['last_run_attempts']} uploads succeeded "
+                                 "in the 24 hours before the latest attempt")
+            tiles[2].metric("Recent", percent(health["success_rate"]), border=True,
+                            help=f"{health['published']} of {health['attempts']} of the latest uploads succeeded; "
+                                 f"{health['queued']} waiting in the queue")
+            if rows:
+                html_table(rows, {"account": "Account", "env": "Env vars (✓ set · ✗ missing · optional)",
+                                  "status": "Status"}, clipped=("env", "status"))
+            st.caption("Last upload: " + (local_time(engine, health["last_published_at"])
+                                          if health["last_published_at"] else "none yet"))
+            if health["last_error"]:
+                with st.expander("Last upload error"):
+                    st.code(redact(str(health["last_error"])), language=None)
+            if st.button(f"Test {title.split(' ·')[0].split(' ')[0]} connection",
+                         key=f"verify_{platform}", width="stretch", help=f"Read-only: {checks}. Nothing is posted."):
+                render_video_check(engine, platform)
+            for result in st.session_state.get(f"{platform}_check", []):
+                show = st.success if result["ok"] else st.error
+                show(f"{result['page']}: {redact(result['summary'])}")
+                st.code(redact("\n".join(result["lines"])), language=None)
+
+
+def render_video_check(engine: Engine, platform: str) -> None:
+    import importlib
+
+    try:
+        module = importlib.import_module(f"plugins.publishers.{VIDEO_PLATFORMS[platform][0]}")
+    except ImportError as exc:
+        st.session_state[f"{platform}_check"] = [{"ok": False, "page": platform, "summary": str(exc), "lines": []}]
+        return
+    with st.spinner(f"Checking the {platform} accounts…"):
+        st.session_state[f"{platform}_check"] = [
+            {"ok": r.ok, "page": r.page_name, "summary": r.summary(), "lines": r.lines()}
+            for r in module.verify_pages(engine.registry, module.pages_to_verify(engine.registry))
+        ]
 
 
 # --------------------------------------------------------------------------- #
@@ -1159,7 +1246,7 @@ def main() -> None:
     with tab_categories:
         render_categories_tab(engine)
     with tab_accounts:
-        render_accounts_tab(engine)
+        render_accounts_tab(engine, metrics)
     with tab_content:
         render_content_tab(engine)
     with tab_run:

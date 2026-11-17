@@ -25,8 +25,16 @@ content_profiles:
     tone: "punchy and playful, three seconds to read"
     enabled: true
 
-  - content_type: "tiktok_video"       # vertical slideshow (FFmpeg) + TikTok caption
-    platform: "tiktok"
+  - content_type: "youtube_short"      # vertical 9:16 MP4 under 60 s (FFmpeg) + "#Shorts" title/description
+    platform: "youtube"                # -> youtube_pub (YouTube Data API v3, resumable upload)
+    generator: "ffmpeg_video_gen"
+    llm_model: "claude-sonnet-5-5"
+    publish_format: "video"
+    tone: "energetic, spoken-style, hook in the first words"
+    enabled: true
+
+  - content_type: "tiktok_video"       # vertical 9:16 MP4 under 60 s (FFmpeg) + TikTok caption
+    platform: "tiktok"                 # -> tiktok_pub (Content Posting API, Direct Post)
     generator: "ffmpeg_video_gen"
     llm_model: "claude-sonnet-5-5"
     publish_format: "video"

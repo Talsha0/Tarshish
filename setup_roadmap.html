@@ -19,6 +19,8 @@
     --p2-soft: #f6e4d2;
     --p3: #a8326e;
     --p3-soft: #f6dde9;
+    --p4: #3a57a8;
+    --p4-soft: #e0e6f5;
     --code-bg: #121c26;
     --code-ink: #e6edf3;
     --code-line: #263544;
@@ -43,6 +45,8 @@
       --p2-soft: #3d2b19;
       --p3: #e57fb2;
       --p3-soft: #3d1a2c;
+      --p4: #8ea7ee;
+      --p4-soft: #1d2440;
       --code-bg: #0a1017;
       --code-ink: #e6edf3;
       --code-line: #263544;
@@ -116,6 +120,7 @@
   .phase { --accent: var(--p1); --accent-soft: var(--p1-soft); counter-reset: step; margin-top: 52px; }
   .phase[data-phase="2"] { --accent: var(--p2); --accent-soft: var(--p2-soft); }
   .phase[data-phase="ig"] { --accent: var(--p3); --accent-soft: var(--p3-soft); }
+  .phase[data-phase="video"] { --accent: var(--p4); --accent-soft: var(--p4-soft); }
   .phase-head { border-top: 3px solid var(--accent); padding-top: 16px; }
   .phase-head .kicker { color: var(--accent); font-weight: 700; }
   h2 { font-family: var(--serif); font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; margin: 4px 0 8px; }
@@ -167,6 +172,7 @@
   .phase[data-phase="1"] .step-num::before { content: "1." counter(step); }
   .phase[data-phase="2"] .step-num::before { content: "2." counter(step); }
   .phase[data-phase="ig"] .step-num::before { content: "IG." counter(step); }
+  .phase[data-phase="video"] .step-num::before { content: "V." counter(step); }
   .step-body p { margin: 8px 0 0; }
   .step-body p.done-when {
     margin-top: 12px; padding: 8px 12px; border-radius: 8px;
@@ -277,7 +283,7 @@ python main.py --publish --category gadgets --lang he [--content-types instagram
       <p style="margin:8px 0 0;font-size:.9rem">Configuration has three parts, each a seed file in <code>config/</code>
         and a tab of the dashboard: <strong>categories</strong> (search rules per store, in English),
         <strong>content types</strong> (generator + AI model per <code>instagram_post</code>, <code>instagram_story</code>,
-        <code>tiktok_video</code>, <code>telegram_post</code>) and the <strong>social accounts</strong> matrix
+        <code>youtube_short</code>, <code>tiktok_video</code>, <code>telegram_post</code>) and the <strong>social accounts</strong> matrix
         (category × language × platform ➔ page and <code>.env</code> variable names).</p>
     </div>
   </section>
@@ -302,6 +308,7 @@ python main.py --publish --category gadgets --lang he [--content-types instagram
         <li>Temu and AliExpress RapidAPI harvesting</li>
         <li>Telegram publisher</li>
         <li>Instagram publisher (feed posts, Reels, Stories) and its live connection check</li>
+        <li>YouTube Shorts and TikTok Direct Post publishers and their live connection checks</li>
       </ul>
       <p style="margin:8px 0 0;font-size:.86rem;color:var(--muted)">Tested against stand-ins only. Phase 2 is their first contact with the real services.</p>
     </div>
@@ -315,7 +322,6 @@ python main.py --publish --category gadgets --lang he [--content-types instagram
     <div class="card">
       <h3>➕ Not built yet</h3>
       <ul>
-        <li>TikTok, YouTube publishers (TikTok accounts are in the matrix, disabled)</li>
         <li>Automatic metrics collection</li>
         <li>Dashboard login</li>
       </ul>
@@ -717,18 +723,17 @@ python main.py --stats</code></pre></div>
       <li class="step" data-step="p2-tiktok">
         <input class="step-check" type="checkbox" id="cb-p2-tiktok">
         <div class="step-body">
-          <label class="step-title" for="cb-p2-tiktok"><span class="step-num"></span> Add TikTok and other video platforms
-            <span class="tag build">needs building</span></label>
-          <p>Video platforms need three pieces that are not written yet:</p>
-          <p>1. A publisher: <code>plugins/publishers/tiktok_pub.py</code> extending <code>BasePublisher</code>, declaring
-            its <code>required_credentials</code> and <code>default_env_vars</code>. The <code>tiktok_video</code> content type
-            and the (gadgets, he/en, tiktok) accounts already exist, disabled — enable them in the matrix.<br>
-            2. Rendering: <code>ffmpeg_video_gen</code> renders a 9:16 slideshow when <code>VIDEO_RENDER_ENABLED=true</code> and
-            <code>ffmpeg</code> is installed (otherwise it writes render jobs to <code>output/render_jobs/</code>).<br>
-            3. Public media hosting: implement <code>storage/cloud_storage_stub.py</code> and set <code>STORAGE_MODE=cloud</code>.</p>
-          <p class="note">TikTok's posting API requires an approved developer app. Start that application early; approval takes time.</p>
+          <label class="step-title" for="cb-p2-tiktok"><span class="step-num"></span> Turn on YouTube Shorts and TikTok
+            <span class="tag live">first live call</span></label>
+          <p>The publishers are built: <code>plugins/publishers/youtube_pub.py</code> (YouTube Data API v3, resumable
+            upload) and <code>plugins/publishers/tiktok_pub.py</code> (Content Posting API, Direct Post). The
+            <code>youtube_short</code> and <code>tiktok_video</code> content types and the (gadgets, he/en) accounts are in
+            the seed files. What is left is credentials and rendering: work through
+            <a href="#video-setup">Short-Form Video APIs Setup</a> below.</p>
+          <p class="note">TikTok only lets audited apps post publicly, and YouTube locks uploads from unaudited API
+            projects to private. Apply for both audits early; approval takes time.</p>
           <p class="done-when"><strong>Done when:</strong> <code>python main.py --publish --category gadgets --lang he
-            --content-types tiktok_video --dry-run</code> shows the TikTok account as ready.</p>
+            --content-types youtube_short,tiktok_video --dry-run</code> shows both accounts as ready.</p>
         </div>
       </li>
 
@@ -1065,6 +1070,227 @@ python main.py --verify-instagram --category gadgets --lang he</code></pre></div
           <p class="done-when"><strong>Done when:</strong> the report reads
             <code>Connected as @your_account | BUSINESS | Permissions: ✓ instagram_business_basic, ✓ instagram_business_content_publish</code>
             and ends with <code>Ready for live publishing.</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ═══════════════════ SHORT-FORM VIDEO APIS ═══════════════════ -->
+  <section class="phase" data-phase="video" id="video-setup">
+    <div class="phase-head">
+      <div class="kicker">Publisher setup · Google &amp; TikTok</div>
+      <h2>Short-Form Video APIs Setup (YouTube Shorts &amp; TikTok)</h2>
+      <p class="phase-intro">Manual steps before <code>youtube_pub</code> and <code>tiktok_pub</code> can publish. Both
+        platforms take the video file itself (no URL pull), so the engine must render real MP4s. Secrets go only in
+        <code>.env</code> (or the production platforms' secret settings); logs show them as <code>[REDACTED]</code>.</p>
+      <div class="phase-progress">
+        <div class="meter" data-meter="video"><span></span></div>
+        <span class="count" data-count="video">0 of 0</span>
+      </div>
+    </div>
+
+    <h3 class="group">A · YouTube Data API v3 (Google Cloud Console)</h3>
+    <ol class="steps">
+      <li class="step" data-step="vid-yt-project">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-project">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-project"><span class="step-num"></span> Create a Google Cloud project</label>
+          <p>In the <a href="https://console.cloud.google.com/">Google Cloud Console</a>
+            (<code>console.cloud.google.com</code>), open the project picker and choose <strong>New project</strong>.
+            One project serves every channel; its daily quota is shared between them.</p>
+          <p class="done-when"><strong>Done when:</strong> the new project is selected in the console's top bar.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-yt-enable">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-enable">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-enable"><span class="step-num"></span> Enable the YouTube Data API v3</label>
+          <p><strong>APIs &amp; Services → Library</strong>, search for <strong>YouTube Data API v3</strong> and click
+            <strong>Enable</strong>.</p>
+          <p class="note">The default quota is 10,000 units a day and every upload (<code>videos.insert</code>) costs
+            1,600, so about 6 Shorts a day per project. The engine counts the units it spends, stops at
+            <code>YOUTUBE_DAILY_QUOTA_UNITS</code>, and waits for the reset at midnight Pacific time after a
+            <code>quotaExceeded</code>. Ask for more under <strong>IAM &amp; Admin → Quotas</strong>.</p>
+          <p class="done-when"><strong>Done when:</strong> the API's page shows <strong>API enabled</strong> and a Quotas tab.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-yt-consent">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-consent">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-consent"><span class="step-num"></span> Configure the OAuth consent screen</label>
+          <p><strong>APIs &amp; Services → OAuth consent screen</strong> (Google Auth Platform). Choose
+            <strong>External</strong> for ordinary Google accounts, or <strong>Internal</strong> if every channel belongs to
+            your Google Workspace. Add the scope <code>https://www.googleapis.com/auth/youtube.upload</code> and, while
+            testing, add the channel owners as test users.</p>
+          <p class="note">An External app left in <strong>Testing</strong> issues refresh tokens that expire after 7 days.
+            Set the publishing status to <strong>In production</strong> before generating the token you keep. Separately,
+            YouTube locks uploads from API projects that have not passed its compliance audit to <strong>private</strong>;
+            request the audit through the YouTube API Services audit form before you rely on public Shorts.</p>
+          <p class="done-when"><strong>Done when:</strong> the consent screen lists the <code>youtube.upload</code> scope and
+            shows the publishing status you chose.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-yt-client">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-client">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-client"><span class="step-num"></span> Create an OAuth 2.0 Client ID and
+            download its client secrets</label>
+          <p><strong>APIs &amp; Services → Credentials → Create credentials → OAuth client ID</strong>. Pick
+            <strong>Desktop app</strong> (simplest for the one-off token step below) or <strong>Web application</strong>
+            with <code>http://localhost</code> as an authorised redirect URI. Download the JSON file
+            (<code>client_secret_….json</code>) and keep it out of the repository.</p>
+          <p class="done-when"><strong>Done when:</strong> the client is listed under OAuth 2.0 Client IDs and the JSON
+            file is on your machine.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-yt-refresh">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-refresh">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-refresh"><span class="step-num"></span> Generate a long-lived refresh
+            token <span class="tag live">opens a browser</span></label>
+          <p>The engine ships a helper built on <code>google-auth-oauthlib</code>. It opens Google's consent page,
+            requests <code>https://www.googleapis.com/auth/youtube.upload</code> with offline access, and prints the
+            three <code>.env</code> lines. Sign in with the Google account that owns the channel (pick the brand channel
+            if asked). Repeat once per channel.</p>
+          <div class="cmd"><pre><code>python -m plugins.publishers.youtube_pub --authorize path/to/client_secret.json</code></pre></div>
+          <p class="note">No refresh token in the output? Remove the app at
+            <code>myaccount.google.com/permissions</code> and run it again: Google only returns one on a fresh consent.</p>
+          <p class="done-when"><strong>Done when:</strong> the helper prints a <code>YOUTUBE_REFRESH_TOKEN=1//…</code> line.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-yt-env">
+        <input class="step-check" type="checkbox" id="cb-vid-yt-env">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-yt-env"><span class="step-num"></span> Add the YouTube credentials to
+            <code>.env</code></label>
+          <div class="cmd"><pre><code>YOUTUBE_CLIENT_ID=1234567890-abc.apps.googleusercontent.com
+YOUTUBE_CLIENT_SECRET=GOCSPX-...
+YOUTUBE_REFRESH_TOKEN=1//0g...
+# second channel (gadgets/en), referenced by the accounts matrix:
+YOUTUBE_REFRESH_TOKEN_GADGETS_EN=1//0g...
+# while testing:
+YOUTUBE_PRIVACY_STATUS=unlisted</code></pre></div>
+          <p class="note">Optional: <code>YOUTUBE_CATEGORY_ID</code> (28 Science &amp; Technology, 22 People &amp; Blogs;
+            the default picks 28 for tech collections) and <code>YOUTUBE_DAILY_QUOTA_UNITS</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> the Social Accounts tab shows the YouTube rows as
+            <strong>✅ ready</strong>.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">B · TikTok Content Posting API (TikTok Developers Portal)</h3>
+    <ol class="steps">
+      <li class="step" data-step="vid-tt-register">
+        <input class="step-check" type="checkbox" id="cb-vid-tt-register">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-tt-register"><span class="step-num"></span> Register on the TikTok
+            Developers Portal</label>
+          <p>Sign up at <a href="https://developers.tiktok.com/">developers.tiktok.com</a> and create (or join) an
+            organisation for the business that owns the accounts.</p>
+          <p class="done-when"><strong>Done when:</strong> you can open <strong>Manage apps</strong> in the portal.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-tt-app">
+        <input class="step-check" type="checkbox" id="cb-vid-tt-app">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-tt-app"><span class="step-num"></span> Create an app and add the Content
+            Posting API</label>
+          <p>Create an app, add the products <strong>Login Kit</strong> and <strong>Content Posting API</strong>, switch on
+            <strong>Direct Post</strong>, and request the scopes <code>user.info.basic</code> and
+            <code>video.publish</code>. Note the app's <strong>Client key</strong> and <strong>Client secret</strong>.</p>
+          <p class="note">Until TikTok audits the app, Direct Post only works with <code>SELF_ONLY</code> (private)
+            visibility, the creator account must be private, and at most 5 creators may post per day. Submit the app for
+            review in the portal to post publicly. Rate limit: 6 requests per minute per user token; the engine paces
+            itself under it.</p>
+          <p class="done-when"><strong>Done when:</strong> the app shows Content Posting API with Direct Post enabled and
+            the <code>video.publish</code> scope requested.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-tt-auth">
+        <input class="step-check" type="checkbox" id="cb-vid-tt-auth">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-tt-auth"><span class="step-num"></span> Authorise each TikTok account and
+            obtain its user access token</label>
+          <p>Run Login Kit's OAuth flow (<code>https://www.tiktok.com/v2/auth/authorize/</code> with
+            <code>scope=user.info.basic,video.publish</code>) while signed in as the creator account, then exchange the
+            returned code at <code>https://open.tiktokapis.com/v2/oauth/token/</code>. Keep both the
+            <code>access_token</code> (valid 24 hours) and the <code>refresh_token</code> (valid 365 days).</p>
+          <p class="note">In <strong>sandbox</strong> only the target users you add to the sandbox can authorise, and posts
+            stay private. A <strong>live, audited</strong> app can post publicly for any creator who authorises it.</p>
+          <p class="done-when"><strong>Done when:</strong> you hold an access token and a refresh token for each account
+            in the matrix.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="vid-tt-env">
+        <input class="step-check" type="checkbox" id="cb-vid-tt-env">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-tt-env"><span class="step-num"></span> Add the TikTok credentials to
+            <code>.env</code></label>
+          <div class="cmd"><pre><code>TIKTOK_CLIENT_KEY=aw...
+TIKTOK_CLIENT_SECRET=...
+TIKTOK_ACCESS_TOKEN_GADGETS_HE=act....
+TIKTOK_REFRESH_TOKEN_GADGETS_HE=rft....
+TIKTOK_ACCESS_TOKEN_GADGETS_EN=act....
+TIKTOK_REFRESH_TOKEN_GADGETS_EN=rft....
+# until the app is audited:
+TIKTOK_PRIVACY_LEVEL=SELF_ONLY</code></pre></div>
+          <p class="note">With the client key, client secret and a refresh token present, the publisher refreshes the
+            24-hour access token itself before each post, so scheduled runs keep working. Affiliate posts can be marked
+            as commercial content with <code>TIKTOK_COMMERCIAL_CONTENT=your_brand</code> or <code>branded_content</code>.</p>
+          <p class="done-when"><strong>Done when:</strong> the Social Accounts tab shows the TikTok rows as
+            <strong>✅ ready</strong>.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">C · Video rendering prerequisite</h3>
+    <ol class="steps">
+      <li class="step" data-step="vid-render">
+        <input class="step-check" type="checkbox" id="cb-vid-render">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-render"><span class="step-num"></span> Render vertical 9:16 MP4s
+            (1080x1920, H.264, under 60 seconds)</label>
+          <p>Install <code>ffmpeg</code> (it brings <code>ffprobe</code>) and switch rendering on. The
+            <code>ffmpeg_video_gen</code> generator then renders up to four product photos into a 1080x1920 H.264
+            slideshow of about 12 seconds; storage uploads it and both publishers send the file.</p>
+          <div class="cmd"><pre><code># .env
+VIDEO_RENDER_ENABLED=true
+
+ffmpeg -version
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height,codec_name:format=duration output/videos/&lt;file&gt;.mp4</code></pre></div>
+          <p class="note">Before uploading, both publishers check each clip with <code>ffprobe</code> and refuse one that is
+            not 9:16 or runs over 60 seconds, so a bad render fails fast instead of being rejected after the upload.</p>
+          <p class="done-when"><strong>Done when:</strong> <code>ffprobe</code> reports <code>width=1080</code>,
+            <code>height=1920</code>, <code>codec_name=h264</code> and a duration under 60 for a rendered file.</p>
+        </div>
+      </li>
+    </ol>
+
+    <h3 class="group">D · Verification</h3>
+    <ol class="steps">
+      <li class="step" data-step="vid-verify">
+        <input class="step-check" type="checkbox" id="cb-vid-verify">
+        <div class="step-body">
+          <label class="step-title" for="cb-vid-verify"><span class="step-num"></span> Confirm both handshakes before
+            automated publishing <span class="tag live">read-only live call</span></label>
+          <p>Each check calls the real API without posting. YouTube: refreshes the OAuth token, confirms the
+            <code>youtube.upload</code> scope and shows the quota budget. TikTok: validates the access token (refreshing it
+            when possible), confirms Direct Post access and lists the privacy levels the creator may use. The Social
+            Accounts tab has the same checks as <strong>Test YouTube connection</strong> and <strong>Test TikTok
+            connection</strong>, next to each platform's last-run upload success rate.</p>
+          <div class="cmd"><pre><code>python main.py --verify-youtube
+python main.py --verify-tiktok
+python main.py --publish --category gadgets --lang he --content-types youtube_short,tiktok_video --dry-run</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> both reports end with <code>Ready for live publishing.</code> and
+            the dry-run shows <code>youtube_pub</code> and <code>tiktok_pub</code> as ready.</p>
         </div>
       </li>
     </ol>

@@ -6,7 +6,7 @@
 #
 # token_env_var / account_id_env_var hold the NAMES of .env variables — never the secrets.
 # account_id_env_var feeds the publisher's account credential (Instagram business account id,
-# Telegram chat id). Seeds the `social_accounts` table (dashboard: Social Accounts).
+# Telegram chat id, TikTok refresh token, YouTube channel id). Seeds the `social_accounts` table (dashboard: Social Accounts).
 
 social_accounts:
   # gadgets ------------------------------------------------------------------
@@ -26,19 +26,40 @@ social_accounts:
     account_id_env_var: "INSTAGRAM_BUSINESS_ACCOUNT_ID_GADGETS_EN"
     enabled: true
 
+  # TikTok: token_env_var -> the user access token, account_id_env_var -> that account's refresh
+  # token (optional; with TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET it keeps the 24-hour token fresh).
   - category_id: "gadgets"
     language: "he"
     platform: "tiktok"
     account_handle: "@gadgets.il"
     token_env_var: "TIKTOK_ACCESS_TOKEN_GADGETS_HE"
-    enabled: false                     # no tiktok_pub publisher plugin is installed yet
+    account_id_env_var: "TIKTOK_REFRESH_TOKEN_GADGETS_HE"
+    enabled: true
 
   - category_id: "gadgets"
     language: "en"
     platform: "tiktok"
     account_handle: "@gadgets.en"
     token_env_var: "TIKTOK_ACCESS_TOKEN_GADGETS_EN"
-    enabled: false
+    account_id_env_var: "TIKTOK_REFRESH_TOKEN_GADGETS_EN"
+    enabled: true
+
+  # YouTube Shorts: token_env_var -> the channel's OAuth refresh token; the OAuth client
+  # (YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET) is shared. account_id_env_var (optional) -> the
+  # channel id that --verify-youtube checks the token against.
+  - category_id: "gadgets"
+    language: "he"
+    platform: "youtube"
+    account_handle: "@gadgets.il"
+    token_env_var: "YOUTUBE_REFRESH_TOKEN"
+    enabled: true
+
+  - category_id: "gadgets"
+    language: "en"
+    platform: "youtube"
+    account_handle: "@gadgets.en"
+    token_env_var: "YOUTUBE_REFRESH_TOKEN_GADGETS_EN"
+    enabled: true
 
   # sports -------------------------------------------------------------------
   - category_id: "sports"

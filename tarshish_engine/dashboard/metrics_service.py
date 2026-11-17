@@ -25,7 +25,7 @@ from datetime import timedelta
 from typing import Any
 
 from core.config import Settings
-from core.database import Database, to_iso
+from core.database import Database, from_iso, to_iso
 from core.models import utcnow
 
 # Latest snapshot per publication, shared by every aggregation below.
@@ -209,6 +209,53 @@ class MetricsService:
     def get_storefront_clicks_by_source(self) -> list[dict[str, Any]]:
         """One row per product source (store)."""
         return self._storefront_clicks_by("source")
+
+    def get_upload_health(self, platform: str, recent: int = 20) -> dict[str, Any]:
+        """Delivery outcomes of one publisher plugin (``youtube_pub``, ``tiktok_pub``…).
+
+        ``last_run`` covers the attempts in the 24 hours before the most recent one (a publishing
+        run plus the worker's paced deliveries); ``recent`` covers the latest ``recent`` attempts.
+        Success rates are ``None`` when there is nothing to measure yet.
+        """
+        rows = self.db.query(
+            """
+            SELECT status, error_message, COALESCE(published_at, scheduled_for, created_at) AS attempted_at
+            FROM publications
+            WHERE platform = ? AND status IN ('PUBLISHED', 'FAILED')
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (platform, max(1, recent)),
+        )
+        pending = self.db.query(
+            "SELECT COUNT(*) AS n FROM publications WHERE platform = ? AND status IN ('PENDING', 'QUEUED')",
+            (platform,),
+        )
+
+        def rate(items: list[dict[str, Any]]) -> float | None:
+            return sum(1 for r in items if r["status"] == "PUBLISHED") / len(items) if items else None
+
+        last_run: list[dict[str, Any]] = []
+        if rows:
+            newest = from_iso(rows[0]["attempted_at"])
+            last_run = [r for r in rows if newest is None or (from_iso(r["attempted_at"]) or newest)
+                        >= newest - timedelta(hours=24)]
+        failures = [r for r in rows if r["status"] == "FAILED"]
+        published = [r for r in rows if r["status"] == "PUBLISHED"]
+        return {
+            "platform": platform,
+            "attempts": len(rows),
+            "published": len(published),
+            "failed": len(failures),
+            "success_rate": rate(rows),
+            "last_run_attempts": len(last_run),
+            "last_run_published": sum(1 for r in last_run if r["status"] == "PUBLISHED"),
+            "last_run_success_rate": rate(last_run),
+            "last_attempt_at": rows[0]["attempted_at"] if rows else None,
+            "last_published_at": published[0]["attempted_at"] if published else None,
+            "last_error": failures[0]["error_message"] if failures else None,
+            "queued": int((pending[0] if pending else {}).get("n") or 0),
+        }
 
     def get_budget_status(self) -> dict[str, Any]:
         """Month-to-date AI spend against ``MAX_MONTHLY_AI_BUDGET_USD``."""
