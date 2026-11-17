@@ -164,14 +164,19 @@ def setup_logging(level: str = "INFO", log_file: Path | str | None = None, *, co
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(RedactingFormatter("%(asctime)s %(levelname)-8s %(message)s", "%H:%M:%S"))
         handlers.append(stream)
+    file_error: OSError | None = None
     if log_file:
         path = Path(log_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-        file_handler.setFormatter(
-            RedactingFormatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S")
-        )
-        handlers.append(file_handler)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        except OSError as exc:  # read-only filesystem (serverless hosts): keep console logging
+            file_error = exc
+        else:
+            file_handler.setFormatter(
+                RedactingFormatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+            )
+            handlers.append(file_handler)
 
     for handler in handlers:
         handler._tarshish_handler = True  # type: ignore[attr-defined]
@@ -180,6 +185,8 @@ def setup_logging(level: str = "INFO", log_file: Path | str | None = None, *, co
     root.setLevel(logging.WARNING)  # third-party libraries: warnings and above only
     engine_logger = logging.getLogger(LOGGER_NAME)
     engine_logger.setLevel(level.upper())
+    if file_error is not None:
+        engine_logger.warning("Log file %s is not writable (%s); logging to the console only.", log_file, file_error)
     return engine_logger
 
 

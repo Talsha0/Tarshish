@@ -1,0 +1,17 @@
+# Uploaded to the FindHub API Vercel project (Root Directory: tarshish_engine). The storefront
+# is its own Vercel project; the dashboard runs on Streamlit Community Cloud.
+storefront/
+dashboard/
+tests/
+.github/
+.venv/
+.pytest_tmp/
+output/
+logs/
+**/__pycache__/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example

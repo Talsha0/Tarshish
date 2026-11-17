@@ -2,7 +2,7 @@
 
 Run from the project root (the folder that holds ``main.py``):
 
-    python -m uvicorn api.server:app --reload --port 8000
+    python -m uvicorn storefront_api.server:app --reload --port 8000
 
 Endpoints
 ---------
@@ -12,8 +12,9 @@ Endpoints
     POST /api/track-click/{product_id}   log a confirmed outbound click, return the affiliate link
     GET  /api/health                     liveness + number of listed products
 
-The API reads and writes the same SQLite file as the pipelines and the dashboard
-(``DATABASE_PATH``, WAL mode). It only ever lists products that have a category and
+The API reads and writes the same database as the pipelines and the dashboard: Supabase
+PostgreSQL in production (``DATABASE_URL``), a local SQLite file otherwise (``DATABASE_PATH``).
+On Vercel it is served by ``api/index.py``. It only ever lists products that have a category and
 meet the storefront standard (``STOREFRONT_MIN_RATING`` / ``STOREFRONT_MIN_ORDERS``),
 and it never puts an affiliate link in a listing: the link is handed out by
 ``track-click`` alone, so every outbound visit is counted.
@@ -30,11 +31,11 @@ import re
 from datetime import timedelta
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Path as PathParam, Query
+from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from api import search
+from storefront_api import search
 from core.config import Settings, default_env_file, load_settings
 from core.database import Database
 from core.models import utcnow
@@ -299,10 +300,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the API on top of the engine's settings and database."""
     if settings is None:
         settings = load_settings(default_env_file())
-    setup_logging(settings.log_level, settings.log_file, console=True)
+    # Serverless hosts (Vercel) have a read-only filesystem and collect stdout/stderr as the log.
+    setup_logging(settings.log_level, None if os.environ.get("VERCEL") else settings.log_file, console=True)
     register_env_secrets(os.environ)  # the same redaction the CLI and the dashboard log with
 
-    db = Database(settings.database_path)
+    db = Database.from_settings(settings)
     db.initialize()
     catalogue = Catalogue(
         db,
@@ -331,6 +333,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type"],
     )
     app.state.catalogue = catalogue
+
+    # Public catalogue reads may be cached by the CDN in front of the API (Vercel's edge) for a
+    # short while; clicks and health checks never are. STOREFRONT_CACHE_SECONDS=0 turns it off.
+    cache_seconds = int(_number(settings, "STOREFRONT_CACHE_SECONDS", 60))
+
+    @app.middleware("http")
+    async def cache_headers(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        path = request.url.path
+        cacheable = (
+            request.method == "GET" and response.status_code == 200 and cache_seconds > 0
+            and path.startswith(("/api/products", "/api/categories"))
+        )
+        if cacheable:
+            response.headers.setdefault(
+                "Cache-Control", f"public, max-age=0, s-maxage={cache_seconds}, stale-while-revalidate={cache_seconds * 5}"
+            )
+        else:
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     @app.get("/api/health", tags=["status"])
     def health() -> dict[str, Any]:
@@ -392,7 +414,7 @@ _app: FastAPI | None = None
 
 
 def __getattr__(name: str) -> Any:
-    """Build ``app`` the first time it is asked for (``uvicorn api.server:app``).
+    """Build ``app`` the first time it is asked for (``uvicorn storefront_api.server:app``).
 
     Importing this module therefore has no side effects: no ``.env`` is read and no
     database is opened until a server, or a test calling ``create_app``, needs one.

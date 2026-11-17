@@ -2,8 +2,8 @@
 
 Run it from the project root, next to the pipelines and the dashboard:
 
-    python -m uvicorn api.server:app --reload --port 8000
+    python -m uvicorn storefront_api.server:app --reload --port 8000
 
-``api.server`` serves products, categories and click tracking; ``api.search``
+``storefront_api.server`` serves products, categories and click tracking; ``storefront_api.search``
 is the typo-tolerant search it uses; ``api.seed`` loads the demo catalogue.
 """

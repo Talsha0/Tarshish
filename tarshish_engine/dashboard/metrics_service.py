@@ -12,6 +12,8 @@ Metric semantics
 * AI spend comes from the append-only ``ai_usage`` ledger — the same figure
   the budget guardrail enforces. The per-platform view uses the cost share
   attributed to each publication row instead (a platform has no ledger entry).
+* Every query runs on SQLite and on PostgreSQL: counts use ``SUM(CASE WHEN … THEN 1 ELSE 0 END)``
+  rather than summing booleans, which PostgreSQL does not allow.
 * Storefront clicks are a separate, exact count: one ``click_events`` row per
   confirmed outbound click on the public storefront. They are not mixed into the
   publication KPIs above, which describe posts on social platforms.
@@ -34,18 +36,18 @@ WITH latest AS (
         SELECT ms.*,
                ROW_NUMBER() OVER (PARTITION BY ms.publication_id ORDER BY ms.recorded_at DESC, ms.id DESC) AS rn
         FROM metrics_snapshots ms
-    )
+    ) AS ranked
     WHERE rn = 1
 )
 """
 
 _ACTIVITY_COLUMNS = """
     COUNT(p.id)                                                              AS publications,
-    COALESCE(SUM(p.status = 'PUBLISHED'), 0)                                 AS published,
-    COALESCE(SUM(p.status IN ('PENDING', 'QUEUED')), 0)                      AS queued,
-    COALESCE(SUM(p.status = 'FAILED'), 0)                                    AS failed,
-    COALESCE(SUM(p.status = 'PUBLISHED' AND p.content_type = 'text'), 0)     AS text_count,
-    COALESCE(SUM(p.status = 'PUBLISHED' AND p.content_type = 'video'), 0)    AS video_count,
+    COALESCE(SUM(CASE WHEN p.status = 'PUBLISHED' THEN 1 ELSE 0 END), 0)    AS published,
+    COALESCE(SUM(CASE WHEN p.status IN ('PENDING', 'QUEUED') THEN 1 ELSE 0 END), 0) AS queued,
+    COALESCE(SUM(CASE WHEN p.status = 'FAILED' THEN 1 ELSE 0 END), 0)       AS failed,
+    COALESCE(SUM(CASE WHEN p.status = 'PUBLISHED' AND p.content_type = 'text' THEN 1 ELSE 0 END), 0)  AS text_count,
+    COALESCE(SUM(CASE WHEN p.status = 'PUBLISHED' AND p.content_type = 'video' THEN 1 ELSE 0 END), 0) AS video_count,
     COALESCE(SUM(l.views), 0)                                                AS views,
     COALESCE(SUM(l.clicks), 0)                                               AS clicks,
     COALESCE(SUM(l.conversions), 0)                                          AS conversions,
@@ -136,7 +138,7 @@ class MetricsService:
             f"""
             {_LATEST_SNAPSHOT_CTE}
             SELECT COALESCE(p.content_format, 'legacy') AS content_format,
-                   GROUP_CONCAT(DISTINCT p.model_used) AS models,
+                   {self.db.string_agg_distinct("p.model_used")} AS models,
                    {_ACTIVITY_COLUMNS},
                    COALESCE(SUM(p.generation_cost_usd), 0) AS ai_spend_usd
             FROM publications p LEFT JOIN latest l ON l.publication_id = p.id
@@ -159,8 +161,8 @@ class MetricsService:
         row = self.db.query_one(
             """
             SELECT COUNT(*)                                AS total_clicks,
-                   COALESCE(SUM(clicked_at >= :week), 0)   AS clicks_7d,
-                   COALESCE(SUM(clicked_at >= :day), 0)    AS clicks_24h,
+                   COALESCE(SUM(CASE WHEN clicked_at >= :week THEN 1 ELSE 0 END), 0) AS clicks_7d,
+                   COALESCE(SUM(CASE WHEN clicked_at >= :day THEN 1 ELSE 0 END), 0)  AS clicks_24h,
                    COUNT(DISTINCT product_id)              AS products_clicked,
                    MAX(clicked_at)                         AS last_click_at
             FROM click_events
@@ -189,8 +191,8 @@ class MetricsService:
             )
             SELECT s.name                                    AS {column},
                    COUNT(c.id)                               AS clicks,
-                   COALESCE(SUM(c.clicked_at >= :week), 0)   AS clicks_7d,
-                   COALESCE(SUM(c.clicked_at >= :day), 0)    AS clicks_24h,
+                   COALESCE(SUM(CASE WHEN c.clicked_at >= :week THEN 1 ELSE 0 END), 0) AS clicks_7d,
+                   COALESCE(SUM(CASE WHEN c.clicked_at >= :day THEN 1 ELSE 0 END), 0)  AS clicks_24h,
                    COUNT(DISTINCT c.product_id)              AS products_clicked,
                    MAX(c.clicked_at)                         AS last_click_at
             FROM scope s LEFT JOIN click_events c ON c.{column} = s.name

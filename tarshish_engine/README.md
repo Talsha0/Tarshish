@@ -2,7 +2,7 @@
 
 Plugin-based affiliate engine with a **two-stage, decoupled architecture**:
 
-1. **Harvest** (language-agnostic) — fetch products per `(category, source)` into SQLite, once.
+1. **Harvest** (language-agnostic) — fetch products per `(category, source)` into the database, once.
 2. **Publish** (per language) — for `(category, language, content types)`, turn harvested products into
    localized posts, Stories and videos with the model routed to each content type, and publish or queue
    them to the account mapped to `(category, language, platform)`.
@@ -10,8 +10,12 @@ Plugin-based affiliate engine with a **two-stage, decoupled architecture**:
 Adding a category, a language, an AI model, a product source, a video renderer or a publishing
 destination never requires a change in `core/`.
 
-The same database feeds **FindHub**, the public deal storefront: a FastAPI backend in `api/` and a
+The same database feeds **FindHub**, the public deal storefront: a FastAPI backend in `storefront_api/` and a
 Next.js site in `storefront/`. See [FindHub storefront](#findhub-storefront).
+
+The database is a local SQLite file for development and Supabase PostgreSQL in production
+(`DATABASE_URL`). Production runs on Vercel (storefront + API), Streamlit Community Cloud (dashboard)
+and GitHub Actions (scheduled harvest, publish and queue worker): see [`../DEPLOYMENT.md`](../DEPLOYMENT.md).
 
 ## Quick start
 
@@ -21,7 +25,7 @@ Every dependency installs from a prebuilt or pure-Python wheel, so no compiler i
 ```bash
 python -m venv --clear .venv
 .venv\Scripts\activate            # Windows  (Linux/macOS: source .venv/bin/activate)
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt   # everything: engine, API, dashboard, tests
 copy .env.example .env            # optional: everything works offline without keys
 
 python main.py --harvest --source temu_mock --category gadgets          # Stage 1: offline catalogue, no quota
@@ -37,7 +41,8 @@ A step-by-step checklist from first run to production is in
 ### Running all three layers
 
 The pipeline engine, the storefront backend and the storefront website are separate processes over one
-SQLite file (`tarshish_engine.db`, WAL mode, so they can read and write at the same time). Run each in
+database: locally the SQLite file `tarshish_engine.db` (WAL mode, so they can read and write at the same
+time), or the Supabase database when `DATABASE_URL` is set. Run each in
 its own terminal, from this folder, with the virtual environment active:
 
 ```bash
@@ -47,7 +52,7 @@ python main.py --harvest --source temu_mock --category gadgets
 python main.py --publish --category gadgets --lang he --dry-run
 
 # 2. FastAPI storefront backend: products, search, click tracking
-python -m uvicorn api.server:app --reload --port 8000              # same as: uvicorn api.server:app --reload --port 8000
+python -m uvicorn storefront_api.server:app --reload --port 8000   # same as: uvicorn storefront_api.server:app --reload --port 8000
 
 # 3. Next.js storefront frontend (Node.js 20.9+)
 cd storefront && npm install && npm run dev
@@ -186,7 +191,10 @@ details alone.
 category" compare against the category's current leaders. `stock_urgency_label` is the one free-text
 field and is shown as stored, so only set it from data you can stand behind.
 
-### API (`api/server.py`)
+### API (`storefront_api/server.py`)
+
+On Vercel the same app is served by `api/index.py` (see `vercel.json`); `api/` holds only that entry
+file because Vercel turns every Python file there into a function.
 
 Interactive docs: <http://localhost:8000/api/docs>.
 
@@ -199,7 +207,7 @@ Interactive docs: <http://localhost:8000/api/docs>.
 | `GET /api/health` | Liveness and the number of listed products. |
 
 The affiliate link is never part of a listing; only `track-click` hands it out, so every outbound visit
-is counted. Search (`api/search.py`) forgives typos, partial words and plural endings in Hebrew and
+is counted. Search (`storefront_api/search.py`) forgives typos, partial words and plural endings in Hebrew and
 English ("earbds", "smartwacth", "אוזנית"); it uses `rapidfuzz` when the library loads and a pure-Python
 fallback otherwise. There is no rate limiting yet: put the site behind a proxy that has it before going public.
 
@@ -419,7 +427,11 @@ default prompt, the offline writer and `finish()`.
 
 ## Database notes
 
-SQLite (`tarshish_engine.db`) in WAL mode, schema v3:
+Schema v3, on SQLite (`tarshish_engine.db`, WAL mode) or PostgreSQL (`DATABASE_URL`; the same tables
+in `core/schema_postgres.sql`, applied on the first connect, with Row Level Security on so Supabase's
+public APIs see nothing). Every query is written once for both; `core/database.py` translates the
+placeholders for PostgreSQL. Copy a local database into Supabase with
+`python main.py --import-sqlite tarshish_engine.db` (with `DATABASE_URL` set).
 
 * **Configuration** — `categories` (`category_id` PK, display names, `temu_search_json`,
   `aliexpress_search_json`, `min_rating`, `min_orders`, `enabled`), `content_profiles` (`content_type` PK,
@@ -453,6 +465,12 @@ python -m pytest tests -q
 
 The suite needs no network, API keys or `.env`. Every test gets its own temporary database, kept under
 `.pytest_tmp/` inside the project (see `pytest.ini`) rather than in the shared system temp folder.
+
+To run the same suite on PostgreSQL (as CI does), point it at a server; each test gets its own schema:
+
+```bash
+TARSHISH_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres python -m pytest tests -q
+```
 
 | File | Covers |
 |---|---|

@@ -4,6 +4,10 @@ Run from the project root:
 
     python -m streamlit run dashboard/app.py
 
+In production it runs on Streamlit Community Cloud (entrypoint ``tarshish_engine/dashboard/app.py``,
+dependencies from ``dashboard/requirements.txt``) against the Supabase database, and asks for
+``DASHBOARD_PASSWORD`` before showing anything.
+
 Tabs
 ----
 1. Categories & Search   — categories, their Temu / AliExpress search rules, "Harvest Now" (Stage 1)
@@ -24,8 +28,10 @@ dashboard working on locked-down machines.
 from __future__ import annotations
 
 import contextlib
+import hmac
 import html
 import io
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -1011,8 +1017,8 @@ def publications_table(engine: Engine, rows: list[dict[str, Any]], columns: dict
     )
 
 
-def read_log_tail(path: Path, lines: int) -> str:
-    if not path.is_file():
+def read_log_tail(path: Path | None, lines: int) -> str:
+    if path is None or not path.is_file():
         return ""
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         tail = handle.readlines()[-lines:]
@@ -1097,7 +1103,44 @@ def render_queue_tab(engine: Engine) -> None:
 # --------------------------------------------------------------------------- #
 # Page
 # --------------------------------------------------------------------------- #
+def require_login() -> None:
+    """Stop the page unless the visitor knows ``DASHBOARD_PASSWORD``.
+
+    The dashboard edits the configuration and starts paid, public publishing runs, so a
+    deployment reachable from the internet must be locked. With ``DATABASE_URL`` set (a
+    production database) the page refuses to open until a password is configured; a purely
+    local SQLite setup may run without one.
+    """
+    from dotenv import load_dotenv
+
+    from core.config import default_env_file
+
+    env_file = default_env_file()
+    if env_file.is_file():
+        load_dotenv(env_file, override=False, encoding="utf-8")
+    password = (os.environ.get("DASHBOARD_PASSWORD") or "").strip()
+    if not password:
+        if (os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or "").strip():
+            st.error("Set DASHBOARD_PASSWORD before opening the dashboard on a production database.")
+            st.caption("Streamlit Community Cloud: app ⋮ > Settings > Secrets, add  DASHBOARD_PASSWORD = \"…\"")
+            st.stop()
+        return
+    if st.session_state.get("_authenticated"):
+        return
+    st.title("⛵ Tarshish Engine")
+    with st.form("login"):
+        attempt = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        if hmac.compare_digest(attempt.encode("utf-8"), password.encode("utf-8")):
+            st.session_state["_authenticated"] = True
+            st.rerun()
+        st.error("Wrong password.")
+    st.stop()
+
+
 def main() -> None:
+    require_login()
     try:
         engine = get_engine()
     except ConfigError as exc:

@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from api import search
-from api.seed import seed_storefront
-from api.server import create_app
+from storefront_api import search
+from storefront_api.seed import seed_storefront
+from storefront_api.server import create_app
 from core.database import PRODUCT_STOREFRONT_COLUMNS, Database, category_slug
 from core.models import Product, utcnow
 from dashboard.metrics_service import MetricsService
@@ -328,7 +328,7 @@ def test_cors_allows_the_storefront_origin_only(api):
 
 def test_importing_the_server_module_opens_nothing(monkeypatch, tmp_path):
     """`api.server:app` is built on first access, so importing the module never reads .env or a database."""
-    import api.server as server
+    import storefront_api.server as server
 
     monkeypatch.setattr(server, "_app", None)
     database = tmp_path / "lazy.db"
@@ -372,7 +372,7 @@ def test_metrics_service_counts_storefront_clicks_per_category_and_source(engine
 # -- project contract ------------------------------------------------------------------- #
 def test_storefront_files_exist_and_avoid_the_retired_term():
     expected = [
-        "api/__init__.py", "api/server.py", "api/search.py",
+        "storefront_api/__init__.py", "storefront_api/server.py", "storefront_api/search.py", "api/index.py",
         "storefront/package.json", "storefront/next.config.mjs", "storefront/tailwind.config.ts",
         "storefront/src/app/[lang]/page.tsx", "storefront/src/app/[lang]/c/[category]/page.tsx",
         "storefront/src/app/[lang]/p/[productId]/page.tsx",
@@ -386,9 +386,31 @@ def test_storefront_files_exist_and_avoid_the_retired_term():
     # The storefront speaks of categories, collections and hubs. The older word survives only in the
     # engine's own plugin contract, never in the API, the storefront or its texts.
     retired = re.compile("ni" + "che", re.IGNORECASE)
-    sources = [*(ROOT / "api").glob("*.py")]
+    sources = [*(ROOT / "storefront_api").glob("*.py"), *(ROOT / "api").glob("*.py")]
     for folder in ("src",):
         sources += [path for path in (ROOT / "storefront" / folder).rglob("*") if path.is_file()]
     sources += [ROOT / "storefront" / name for name in ("package.json", "next.config.mjs", "tailwind.config.ts")]
     offenders = [str(path.relative_to(ROOT)) for path in sources if retired.search(path.read_text(encoding="utf-8"))]
     assert not offenders
+
+
+def test_catalogue_reads_are_cdn_cacheable_and_clicks_are_not(api):
+    assert "s-maxage=60" in api.get("/api/products").headers["cache-control"]
+    assert "s-maxage=60" in api.get("/api/categories").headers["cache-control"]
+    assert api.post("/api/track-click/1", json={"language": "he"}).headers["cache-control"] == "no-store"
+    assert api.get("/api/health").headers["cache-control"] == "no-store"
+    assert api.get("/api/products/9999").headers["cache-control"] == "no-store"
+
+
+def test_the_vercel_entry_point_builds_the_app(monkeypatch, tmp_path):
+    """api/index.py is what Vercel runs: it must expose a FastAPI `app` configured from the environment."""
+    import importlib.util
+
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "vercel.db"))
+    monkeypatch.setenv("VERCEL", "1")
+    spec = importlib.util.spec_from_file_location("vercel_index", ROOT / "api" / "index.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from fastapi.testclient import TestClient
+
+    assert TestClient(module.app).get("/api/health").json()["status"] == "ok"

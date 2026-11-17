@@ -9,7 +9,7 @@ import logging
 import httpx
 import pytest
 
-from api.seed import seed_temu
+from storefront_api.seed import seed_temu
 from core import bootstrap
 from core.interfaces import PluginContext
 from core.resilience import ConfigError, redact

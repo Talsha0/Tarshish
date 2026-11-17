@@ -1,8 +1,16 @@
-"""SQLite persistence: schema, WAL-mode connections and the engine's queries.
+"""Persistence: schema, connections and the engine's queries, on SQLite or PostgreSQL.
 
 Design notes
 ------------
-* Every connection enforces ``PRAGMA journal_mode=WAL`` so the CLI, the queue
+* Two backends share every query. ``Database("path/to/file.db")`` is SQLite (local
+  development, tests); ``Database("postgresql://…")`` is PostgreSQL — Supabase in
+  production. Queries are written once with ``?`` / ``:name`` placeholders and portable
+  SQL; on PostgreSQL the placeholders are translated to psycopg's ``%s`` / ``%(name)s``.
+* PostgreSQL connections come from a small per-process pool, so a serverless function
+  (the storefront API on Vercel) reuses its connections across warm invocations. Server-side
+  prepared statements are off, which Supabase's transaction pooler (port 6543) requires.
+  Its schema lives in ``core/schema_postgres.sql`` and is applied on the first connect.
+* On SQLite, every connection enforces ``PRAGMA journal_mode=WAL`` so the CLI, the queue
   worker and the dashboard can read and write concurrently without lock errors.
 * One short-lived connection per operation keeps the class safe to share
   between threads (Streamlit reruns, worker loop) and processes.
@@ -27,12 +35,18 @@ Design notes
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from core.models import GeneratedContent, Product, PublicationStatus, category_slug, utcnow
 from core.resilience import get_logger
@@ -213,6 +227,180 @@ _STOREFRONT_COLUMNS = (
 
 _ACTIVE = (PublicationStatus.PENDING.value, PublicationStatus.QUEUED.value)
 
+POSTGRES_SCHEMA_FILE = Path(__file__).with_name("schema_postgres.sql")
+_POSTGRES_SCHEMAS = ("postgres://", "postgresql://")
+# Query-string parameters some providers append to their connection strings that libpq rejects
+# (Supabase's Vercel integration adds `supa=`, Prisma-style strings add `pgbouncer=`).
+_NON_LIBPQ_PARAMS = {"supa", "pgbouncer", "connection_limit", "pool_timeout"}
+# Serializes concurrent first-time schema setup across processes (any constant works).
+_SCHEMA_LOCK_KEY = 7_405_031_117
+
+# Every table, parents before children (used to copy a database).
+TABLES = (
+    "categories", "content_profiles", "social_accounts", "products", "publications",
+    "metrics_snapshots", "ai_usage", "click_events",
+)
+_IDENTITY_TABLES = ("products", "publications", "metrics_snapshots", "ai_usage", "click_events")
+
+
+def is_postgres_url(target: str | os.PathLike[str] | None) -> bool:
+    return isinstance(target, str) and target.strip().lower().startswith(_POSTGRES_SCHEMAS)
+
+
+def postgres_conninfo(url: str) -> str:
+    """The connection string with provider-specific, non-libpq query parameters removed."""
+    parts = urlsplit(url.strip())
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in _NON_LIBPQ_PARAMS]
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def database_errors() -> tuple[type[BaseException], ...]:
+    """Exception types a database call can raise, for callers that degrade gracefully."""
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - psycopg is in requirements.txt
+        return (sqlite3.Error,)
+    return (sqlite3.Error, psycopg.Error)
+
+
+@lru_cache(maxsize=1024)
+def to_pyformat(sql: str) -> str:
+    """Translate ``?`` and ``:name`` placeholders to psycopg's ``%s`` and ``%(name)s``.
+
+    String literals, quoted identifiers and ``--`` comments are copied unchanged, ``::`` casts
+    are kept, and literal ``%`` characters are doubled so psycopg does not read them as
+    placeholders.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        char = sql[i]
+        if char in ("'", '"'):
+            end = i + 1
+            while end < n:
+                if sql[end] == char:
+                    if end + 1 < n and sql[end + 1] == char:  # '' / "" escape
+                        end += 2
+                        continue
+                    break
+                end += 1
+            out.append(sql[i:end + 1].replace("%", "%%"))
+            i = end + 1
+        elif char == "-" and sql.startswith("--", i):
+            end = sql.find("\n", i)
+            end = n if end == -1 else end
+            out.append(sql[i:end].replace("%", "%%"))
+            i = end
+        elif char == "?":
+            out.append("%s")
+            i += 1
+        elif char == "%":
+            out.append("%%")
+            i += 1
+        elif char == ":" and sql.startswith("::", i):
+            out.append("::")
+            i += 2
+        elif char == ":" and i + 1 < n and (sql[i + 1].isalpha() or sql[i + 1] == "_"):
+            end = i + 1
+            while end < n and (sql[end].isalnum() or sql[end] == "_"):
+                end += 1
+            out.append(f"%({sql[i + 1:end]})s")
+            i = end
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
+def _plain(value: Any) -> Any:
+    """PostgreSQL ``numeric`` results (``SUM`` of integers…) as the int/float SQLite would return."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
+def _pg_row_factory(cursor: Any) -> Any:
+    names = [column.name for column in cursor.description or ()]
+
+    def make_row(values: Sequence[Any]) -> dict[str, Any]:
+        return {name: _plain(value) for name, value in zip(names, values)}
+
+    return make_row
+
+
+class _PgConnection:
+    """A psycopg connection that accepts the engine's ``?`` / ``:name`` SQL, like ``sqlite3``."""
+
+    def __init__(self, raw: Any) -> None:
+        self.raw = raw
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> Any:
+        cursor = self.raw.cursor()
+        if params:
+            cursor.execute(to_pyformat(sql), params if isinstance(params, Mapping) else list(params))
+        else:
+            cursor.execute(to_pyformat(sql))
+        return cursor
+
+
+_pools: dict[str, Any] = {}
+_pools_lock = threading.Lock()
+
+
+def _pool_for(url: str) -> Any:
+    """One connection pool per database URL and process."""
+    with _pools_lock:
+        pool = _pools.get(url)
+        if pool is None:
+            from psycopg_pool import ConnectionPool
+
+            pool = ConnectionPool(
+                postgres_conninfo(url),
+                min_size=1,
+                max_size=max(1, int(os.environ.get("DATABASE_POOL_SIZE", "4") or 4)),
+                # Supabase's pooler closes idle client connections; check before handing one out.
+                check=ConnectionPool.check_connection,
+                max_idle=120,
+                timeout=15,
+                kwargs={
+                    "prepare_threshold": None,  # no server-side prepared statements (transaction pooler)
+                    "row_factory": _pg_row_factory,
+                    "connect_timeout": 10,
+                    "application_name": "tarshish",
+                },
+                open=True,
+            )
+            try:
+                pool.wait(timeout=15)
+            except Exception:
+                pool.close()
+                _raise_connection_error(url)
+                raise
+            _pools[url] = pool
+        return pool
+
+
+def _raise_connection_error(url: str) -> None:
+    """Surface the real reason a pool could not connect (bad password, unknown host…)."""
+    import psycopg
+
+    try:
+        psycopg.connect(postgres_conninfo(url), connect_timeout=10).close()
+    except psycopg.OperationalError as exc:
+        raise psycopg.OperationalError(f"Cannot connect to PostgreSQL: {str(exc).strip()}") from None
+
+
+def close_pools() -> None:
+    """Close every PostgreSQL connection pool of this process (tests, clean shutdown)."""
+    with _pools_lock:
+        pools = list(_pools.values())
+        _pools.clear()
+    for pool in pools:
+        pool.close()
+
+
+atexit.register(close_pools)  # a CLI run exits at once instead of waiting on idle pool threads
+
 
 def to_iso(moment: datetime) -> str:
     """UTC ISO-8601 with second precision — the single on-disk timestamp format."""
@@ -240,15 +428,47 @@ def product_from_row(row: Mapping[str, Any]) -> Product:
 
 
 class Database:
-    """Thin, explicit data-access layer over the engine's SQLite file."""
+    """Thin, explicit data-access layer over SQLite (a file path) or PostgreSQL (a URL)."""
 
-    def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
+    def __init__(self, target: Path | str) -> None:
+        self.url: str | None = target.strip() if is_postgres_url(target) else None
+        self.dialect = "postgresql" if self.url else "sqlite"
+        # SQLite file; for PostgreSQL a nominal path, never opened.
+        self.path = Path("postgresql") if self.url else Path(target)
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "Database":
+        """``DATABASE_URL`` (PostgreSQL / Supabase) when set, otherwise the ``DATABASE_PATH`` SQLite file."""
+        url = getattr(settings, "database_url", None)
+        if url is not None:
+            return cls(url.get_secret_value() if hasattr(url, "get_secret_value") else str(url))
+        return cls(settings.database_path)
+
+    @property
+    def is_postgres(self) -> bool:
+        return self.dialect == "postgresql"
+
+    def describe(self) -> str:
+        """Where the data lives, safe to print (no password)."""
+        if self.url:
+            parts = urlsplit(self.url)
+            return f"PostgreSQL at {parts.hostname or 'localhost'}{f':{parts.port}' if parts.port else ''}"
+        return f"SQLite file {self.path.name}"
+
+    def string_agg_distinct(self, expression: str) -> str:
+        """SQL for a comma-separated list of the distinct values of ``expression``."""
+        if self.is_postgres:
+            return f"STRING_AGG(DISTINCT {expression}, ',')"
+        return f"GROUP_CONCAT(DISTINCT {expression})"
 
     # -- connections ------------------------------------------------------- #
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        """Open a WAL-mode connection; commit on success, roll back on error."""
+    def connect(self) -> Iterator[Any]:
+        """A connection with ``execute(sql, params)``; commit on success, roll back on error."""
+        if self.url:
+            with _pool_for(self.url).connection() as raw:  # the pool commits or rolls back
+                yield _PgConnection(raw)
+            return
         conn = sqlite3.connect(str(self.path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
@@ -266,6 +486,9 @@ class Database:
 
     def initialize(self) -> None:
         """Create the schema (idempotent), upgrade older databases in place and verify WAL mode."""
+        if self.is_postgres:
+            self._initialize_postgres()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._upgrade_publications()
         with self.connect() as conn:
@@ -279,6 +502,34 @@ class Database:
             self._migrate(conn)
             conn.executescript(STOREFRONT_SCHEMA)
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
+
+    def _postgres_schema_version(self, conn: Any) -> int:
+        if not conn.execute("SELECT to_regclass('tarshish_meta') IS NOT NULL AS present").fetchone()["present"]:
+            return 0
+        row = conn.execute("SELECT value FROM tarshish_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+
+    def _initialize_postgres(self) -> None:
+        """Apply ``schema_postgres.sql`` once per schema version.
+
+        The fast path is a single query, so the serverless API can call this on every cold
+        start. The first process to find an older version takes an advisory lock and applies
+        the (idempotent) schema; any process that waited on the lock re-checks and skips.
+        """
+        with self.connect() as conn:
+            if self._postgres_schema_version(conn) >= SCHEMA_VERSION:
+                return
+        with self.connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (_SCHEMA_LOCK_KEY,))
+            if self._postgres_schema_version(conn) >= SCHEMA_VERSION:
+                return
+            conn.raw.execute(POSTGRES_SCHEMA_FILE.read_text(encoding="utf-8"))
+            conn.execute(
+                "INSERT INTO tarshish_meta (key, value) VALUES ('schema_version', ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
+        logger.info("Database: PostgreSQL schema v%d applied.", SCHEMA_VERSION)
 
     def _upgrade_publications(self) -> None:
         """Schema v2 -> v3: rebuild ``publications`` without its foreign key to the legacy ``pipelines`` table.
@@ -361,6 +612,16 @@ class Database:
             except sqlite3.OperationalError as exc:
                 if "no such column" not in str(exc).lower():
                     raise
+
+    def table_columns(self, table: str) -> list[dict[str, Any]]:
+        """``[{'name': column}, …]`` of a table, on either database."""
+        if self.is_postgres:
+            return self.query(
+                "SELECT column_name AS name FROM information_schema.columns "
+                "WHERE table_name = ? AND table_schema = current_schema() ORDER BY ordinal_position",
+                (table,),
+            )
+        return self.query(f"SELECT name FROM pragma_table_info('{table}')")
 
     def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[dict[str, Any]]:
         """Run a read query and return plain dict rows (used by the dashboard layer)."""
@@ -526,7 +787,7 @@ class Database:
         page = "" if limit is None else " LIMIT ? OFFSET ?"
         page_params = [] if limit is None else [limit, offset]
         with self.connect() as conn:
-            total = conn.execute(f"SELECT COUNT(*) FROM products WHERE {where}", params).fetchone()[0]
+            total = conn.execute(f"SELECT COUNT(*) AS n FROM products WHERE {where}", params).fetchone()["n"]
             rows = conn.execute(
                 f"SELECT {_STOREFRONT_COLUMNS} FROM products WHERE {where} ORDER BY {order}{page}",
                 [*params, *page_params],
@@ -572,10 +833,10 @@ class Database:
         with self.connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO click_events (product_id, category, source, language, referrer_path, clicked_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                 (product_id, category, source, language, referrer_path, to_iso(clicked_at or utcnow())),
             )
-            return int(cursor.lastrowid)  # type: ignore[arg-type]
+            return int(cursor.fetchone()["id"])
 
     def click_counts_since(self, since: datetime) -> dict[int, int]:
         """Outbound clicks per product from ``since`` until now."""
@@ -663,6 +924,7 @@ class Database:
                                           caption, media_uri, model_used, generation_cost_usd, scheduled_for,
                                           content_json, target_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
                 """,
                 (
                     pipeline_id, product_id, category, language or content.language, content.content_format,
@@ -672,7 +934,7 @@ class Database:
                     content.model_dump_json(), target_json, to_iso(utcnow()),
                 ),
             )
-            return int(cursor.lastrowid)  # type: ignore[arg-type]
+            return int(cursor.fetchone()["id"])
 
     def mark_published(self, publication_id: int, platform_post_id: str, published_at: datetime) -> None:
         self._execute(
@@ -738,7 +1000,7 @@ class Database:
                 UNION ALL
                 SELECT MAX(scheduled_for) FROM publications
                  WHERE platform = ? AND target_page = ? AND status IN ('PENDING', 'QUEUED')
-            )
+            ) AS activity
             """,
             (platform, target_page, platform, target_page),
         )
@@ -858,7 +1120,47 @@ class Database:
         with self.connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO metrics_snapshots (publication_id, views, clicks, conversions, revenue_usd, recorded_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                 (publication_id, views, clicks, conversions, revenue_usd, to_iso(recorded_at or utcnow())),
             )
-            return int(cursor.lastrowid)  # type: ignore[arg-type]
+            return int(cursor.fetchone()["id"])
+
+
+def copy_database(source: Database, target: Database, *, batch_size: int = 500) -> dict[str, int]:
+    """Copy every row of ``source`` into ``target`` (e.g. a local SQLite file into Supabase).
+
+    Both databases are initialized first. Ids are preserved, so publications keep pointing at
+    their products and metrics at their publications. On PostgreSQL the id sequences are then
+    moved past the copied ids. Configuration rows (categories, content profiles, social accounts) of the source
+    replace the target's; other rows whose key already exists in the target are skipped, so
+    copy into a database that has no products or publications yet. Returns the number of rows
+    read per table.
+    """
+    source.initialize()
+    target.initialize()
+    copied: dict[str, int] = {}
+    with target.connect() as conn:
+        for table in TABLES:
+            target_columns = [row["name"] for row in target.table_columns(table)]
+            rows = source.query(f"SELECT * FROM {table}")
+            copied[table] = len(rows)
+            if not rows:
+                continue
+            columns = [name for name in rows[0] if name in target_columns]
+            conflict = "ON CONFLICT DO NOTHING"
+            if table in Database.CONFIG_TABLES:
+                # Configuration edited in the source wins over the YAML seed the target started with.
+                keys, _ = Database.CONFIG_TABLES[table]
+                updates = ", ".join(f"{name} = excluded.{name}" for name in columns if name not in keys)
+                conflict = f"ON CONFLICT ({', '.join(keys)}) DO UPDATE SET {updates}"
+            sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) {conflict}"
+            for start in range(0, len(rows), batch_size):
+                for row in rows[start:start + batch_size]:
+                    conn.execute(sql, [row[name] for name in columns])
+        if target.is_postgres:
+            for table in _IDENTITY_TABLES:
+                conn.execute(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) "
+                    f"FROM {table}"
+                )
+    return copied

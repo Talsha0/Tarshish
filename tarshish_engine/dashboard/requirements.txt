@@ -1,0 +1,6 @@
+# Admin & analytics dashboard. Streamlit Community Cloud installs this file because it sits
+# next to the entrypoint (dashboard/app.py).
+-r ../requirements-engine.txt
+
+# Uses only basic widgets + HTML, so it does not need pyarrow to load
+streamlit>=1.67,<2

@@ -20,6 +20,14 @@ const display = Frank_Ruhl_Libre({
 
 type LayoutProps = { children: ReactNode; params: Promise<{ lang: string }> };
 
+/** Public address for canonical links and social previews: NEXT_PUBLIC_SITE_URL, else the Vercel production domain. */
+function siteUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (configured) return configured;
+  const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
+  return vercel ? `https://${vercel}` : "http://localhost:3000";
+}
+
 export function generateStaticParams() {
   return LANGS.map((lang) => ({ lang }));
 }
@@ -29,7 +37,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
   if (!isLang(lang)) return {};
   const t = getDictionary(lang);
   return {
-    metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+    metadataBase: new URL(siteUrl()),
     title: t.meta.title,
     description: t.meta.description,
     applicationName: "FindHub",

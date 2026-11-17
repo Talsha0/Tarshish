@@ -1,19 +1,17 @@
-# Core engine
+# Core + FindHub storefront API. This is the file Vercel installs for the API deployment,
+# so it holds only what `api/index.py` (storefront_api/) imports. The engine (harvest, publish,
+# worker) adds requirements-engine.txt; the dashboard adds dashboard/requirements.txt.
 pydantic>=2.9,<3
 pydantic-settings>=2.6,<3
 ruamel.yaml>=0.18                    # pure-Python YAML: installs on new Python versions without a compiler
 python-dotenv>=1.0
-httpx>=0.27,<1                       # Telegram publisher (sync + async)
-tzdata>=2024.1; sys_platform == "win32"   # IANA timezones for the worker on Windows
+httpx>=0.27,<1                       # Telegram publisher (sync + async), Supabase Storage uploads
+tzdata>=2024.1                       # IANA timezones: Windows and slim serverless images ship none
 
-# LLM providers (optional at runtime: without API keys the offline templates are used)
-anthropic>=2.8,<3
-google-genai>=3.0,<4
+# Database: SQLite is built in; PostgreSQL (Supabase) when DATABASE_URL is set
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4
 
-# FindHub storefront API (api/server.py)
+# FindHub storefront API (storefront_api/server.py)
 fastapi>=0.115,<1
-uvicorn>=0.30,<1
-rapidfuzz>=3.9,<4                    # faster typo-tolerant search; api/search.py falls back to pure Python without it
-
-# Admin & analytics dashboard (uses only basic widgets + HTML, so it does not need pyarrow to load)
-streamlit>=1.67,<2
+rapidfuzz>=3.9,<4                    # faster typo-tolerant search; storefront_api/search.py falls back to pure Python without it

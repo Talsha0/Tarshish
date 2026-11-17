@@ -10,7 +10,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from api.seed import seed_temu
+from storefront_api.seed import seed_temu
 from core.config import SocialPage
 from core.interfaces import PluginContext
 from core.models import Product, PublishTarget

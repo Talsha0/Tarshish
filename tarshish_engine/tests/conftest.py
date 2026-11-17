@@ -1,9 +1,17 @@
-"""Shared fixtures: an isolated engine (temp DB, no credentials, no real sleeping)."""
+"""Shared fixtures: an isolated engine (temp DB, no credentials, no real sleeping).
+
+The engine uses a temporary SQLite file by default. Set ``TARSHISH_TEST_DATABASE_URL`` to a
+PostgreSQL connection string to run the same tests against PostgreSQL instead: every test then
+gets its own empty schema, dropped afterwards (CI does this against a Postgres service).
+"""
 
 from __future__ import annotations
 
+import os
 import sys
+import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -14,6 +22,7 @@ if str(ROOT) not in sys.path:
 from core import bootstrap  # noqa: E402
 from core import resilience  # noqa: E402
 from core.config import Settings  # noqa: E402
+from core.database import close_pools  # noqa: E402
 from plugins.sources import aliexpress_providers, temu_providers  # noqa: E402
 
 _CREDENTIAL_VARS = (
@@ -27,7 +36,10 @@ _CREDENTIAL_VARS = (
     "DRY_RUN_PUBLISHER",
     "RAPIDAPI_KEY_ALI_1", "RAPIDAPI_KEY_ALI_2", "RAPIDAPI_KEY_ALI_3", "ALIEXPRESS_TRACKING_ID",
     "ALIEXPRESS_AFFILIATE_URL_TEMPLATE", "ALIEXPRESS_MAX_ITEMS", "ALIEXPRESS_CURRENCY",
+    "DATABASE_URL", "POSTGRES_URL", "DATABASE_POOL_SIZE", "DASHBOARD_PASSWORD",
+    "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_STORAGE_BUCKET",
 )
+POSTGRES_TEST_URL = os.environ.get("TARSHISH_TEST_DATABASE_URL", "").strip()
 
 
 @pytest.fixture(autouse=True)
@@ -51,9 +63,28 @@ def clean_environment(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def make_settings(tmp_path):
+def postgres_url():
+    """A fresh PostgreSQL schema for this test (``None`` when testing on SQLite)."""
+    if not POSTGRES_TEST_URL:
+        yield None
+        return
+    import psycopg
+
+    schema = f"test_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(POSTGRES_TEST_URL, autocommit=True) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+    separator = "&" if "?" in POSTGRES_TEST_URL else "?"
+    yield f"{POSTGRES_TEST_URL}{separator}options={quote(f'-csearch_path={schema}')}"
+    close_pools()
+    with psycopg.connect(POSTGRES_TEST_URL, autocommit=True) as conn:
+        conn.execute(f"DROP SCHEMA {schema} CASCADE")
+
+
+@pytest.fixture
+def make_settings(tmp_path, postgres_url):
     def factory(**overrides) -> Settings:
         values = dict(
+            database_url=postgres_url,
             database_path=tmp_path / "test.db",
             local_media_dir=tmp_path / "media",
             log_file=tmp_path / "logs" / "test.log",

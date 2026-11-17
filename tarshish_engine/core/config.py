@@ -119,7 +119,12 @@ class Settings(BaseSettings):
     local_media_dir: Path = BASE_DIR / "output"
     media_retention_days: int = Field(default=7, ge=0)
 
-    # Persistence & declarative config (the YAML files seed SQLite, which is then the source of truth)
+    # Persistence & declarative config (the YAML files seed the database, which is then the source of truth).
+    # DATABASE_URL (a PostgreSQL / Supabase connection string) wins over the DATABASE_PATH SQLite file.
+    # POSTGRES_URL is what Supabase's Vercel integration sets; it is accepted as a fallback.
+    database_url: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL", "database_url")
+    )
     database_path: Path = BASE_DIR / "tarshish_engine.db"
     config_dir: Path = BASE_DIR / "config"
 
@@ -130,7 +135,7 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    log_file: Path = BASE_DIR / "logs" / "tarshish_engine.log"
+    log_file: Path | None = BASE_DIR / "logs" / "tarshish_engine.log"
 
     # Queue worker: human-like pacing inside an active-hours window
     worker_timezone: str = "Asia/Jerusalem"
@@ -161,10 +166,32 @@ class Settings(BaseSettings):
 
     @field_validator("local_media_dir", "database_path", "config_dir", "log_file", mode="after")
     @classmethod
-    def _anchor_to_project_root(cls, value: Path) -> Path:
+    def _anchor_to_project_root(cls, value: Path | None) -> Path | None:
         """Relative paths are relative to the project, not to the caller's cwd."""
+        if value is None:
+            return None
         value = value.expanduser()
         return value if value.is_absolute() else (BASE_DIR / value).resolve()
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _postgres_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        url = value.get_secret_value().strip()
+        if not url.lower().startswith(("postgres://", "postgresql://")):
+            raise ValueError("must be a PostgreSQL connection string starting with postgresql:// "
+                             "(Supabase: Project Settings > Database > Connection string)")
+        register_secret(url)
+        return SecretStr(url)
+
+    @field_validator("log_file", mode="before")
+    @classmethod
+    def _optional_log_file(cls, value: Any) -> Any:
+        """``LOG_FILE=none`` (or ``off``) logs to the console only — for read-only/serverless hosts."""
+        if isinstance(value, str) and value.strip().lower() in {"none", "off", "false", "-"}:
+            return None
+        return value
 
     @field_validator("aliexpress_affiliate_url_template", mode="after")
     @classmethod

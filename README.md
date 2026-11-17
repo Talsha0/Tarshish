@@ -8,7 +8,10 @@ platforms are added without touching the core; categories, model routing and the
 in the Streamlit dashboard.
 
 The same database also feeds **FindHub**, a public deal storefront in Hebrew and English: a FastAPI backend
-(`tarshish_engine/api/`) and a Next.js site (`tarshish_engine/storefront/`).
+(`tarshish_engine/storefront_api/`) and a Next.js site (`tarshish_engine/storefront/`).
+
+**Production:** storefront and API on Vercel, the database on Supabase, the dashboard on Streamlit
+Community Cloud and the scheduled engine runs on GitHub Actions. Step by step: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ## Get it running
 
@@ -29,7 +32,8 @@ templates and prints the posts to the console.
 
 ## The three layers
 
-All three use the one SQLite file, `tarshish_engine/tarshish_engine.db`. Run each in its own terminal from
+All three use one database: locally the SQLite file `tarshish_engine/tarshish_engine.db`, in production
+Supabase PostgreSQL (`DATABASE_URL`). Run each in its own terminal from
 `tarshish_engine/` (the storefront needs Node.js 20.9+).
 
 ```bash
@@ -41,7 +45,7 @@ python main.py --publish --category gadgets --lang en --content-types instagram_
 python -m streamlit run dashboard/app.py  # optional: categories, accounts matrix, model routing, runs, KPIs
 
 # 2. Storefront backend (FastAPI)  ->  http://localhost:8000/api/docs
-python -m uvicorn api.server:app --reload --port 8000
+python -m uvicorn storefront_api.server:app --reload --port 8000
 
 # 3. Storefront website (Next.js)  ->  http://localhost:3000
 cd storefront && npm install && npm run dev
@@ -51,11 +55,13 @@ cd storefront && npm install && npm run dev
 
 | | |
 |---|---|
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Production: Supabase, Vercel, Streamlit Community Cloud, GitHub Actions and every environment variable. |
 | [`setup_roadmap.html`](setup_roadmap.html) | Step-by-step checklist, from first run to production. Open it in a browser. |
 | [`tarshish_engine/README.md`](tarshish_engine/README.md) | Commands, configuration, architecture, how to add plugins. |
 | [`.claude/`](.claude/CLAUDE.md) | Project knowledge for Claude Code. It loads automatically when you open the repo; `/verify` runs the checks. |
 
-Secrets go only in `tarshish_engine/.env` (git-ignored). Copy `.env.example` to create it.
+Secrets go only in `tarshish_engine/.env` (git-ignored) locally — copy `.env.example` to create it — and in
+each platform's environment-variable settings in production (see `DEPLOYMENT.md`).
 
 On Windows 11, Smart App Control can block freshly installed Python libraries. The commands above are
 written to avoid that (`python -m …`); if you still see "An Application Control policy has blocked this

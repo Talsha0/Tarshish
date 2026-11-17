@@ -1,0 +1,9 @@
+# The engine: harvest (Stage 1), publish (Stage 2), queue worker and the local API server.
+-r requirements.txt
+
+# LLM providers (optional at runtime: without API keys the offline templates are used)
+anthropic>=2.8,<3
+google-genai>=3.0,<4
+
+# Local storefront API server (on Vercel the platform serves api/index.py itself)
+uvicorn>=0.30,<1

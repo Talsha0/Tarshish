@@ -74,7 +74,7 @@ def bootstrap(
         if secret is not None:
             register_secret(secret.get_secret_value())
 
-    db = Database(settings.database_path)
+    db = Database.from_settings(settings)
     db.initialize()
 
     plugins = PluginRegistry().discover()

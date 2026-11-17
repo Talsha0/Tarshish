@@ -490,7 +490,7 @@ python main.py --harvest --source temu_mock --category gadgets
 python main.py --publish --category gadgets --lang he --dry-run
 
 # 2. Storefront backend: products, search, click tracking     (terminal A, leave running)
-python -m uvicorn api.server:app --reload --port 8000
+python -m uvicorn storefront_api.server:app --reload --port 8000
 
 # 3. Storefront website: what shoppers see                    (terminal B, leave running)
 cd storefront
@@ -516,8 +516,8 @@ npm run dev</code></pre></div>
           <label class="step-title" for="cb-p1-store-api"><span class="step-num"></span> Start the storefront backend</label>
           <p>A FastAPI service over the same database. Leave it running in its own terminal, with the virtual
             environment active.</p>
-          <div class="cmd"><pre><code>python -m uvicorn api.server:app --reload --port 8000</code></pre></div>
-          <p class="note">The shorter <code>uvicorn api.server:app --reload --port 8000</code> is the same command;
+          <div class="cmd"><pre><code>python -m uvicorn storefront_api.server:app --reload --port 8000</code></pre></div>
+          <p class="note">The shorter <code>uvicorn storefront_api.server:app --reload --port 8000</code> is the same command;
             the <code>python -m</code> form is the one Windows does not block.</p>
           <p class="done-when"><strong>Done when:</strong> <code>http://localhost:8000/api/health</code> answers
             <code>"products": 14</code>, and <code>http://localhost:8000/api/docs</code> lists the endpoints.</p>
@@ -922,7 +922,7 @@ python main.py --retry-failed</code></pre></div>
           <p>Do this after a real product source is in place (the demo catalogue's store links are placeholders). On the
             server run the backend without <code>--reload</code> and serve a production build of the website. The
             backend address is fixed when the site is built, so set it first.</p>
-          <div class="cmd"><pre><code>python -m uvicorn api.server:app --host 127.0.0.1 --port 8000
+          <div class="cmd"><pre><code>python -m uvicorn storefront_api.server:app --host 127.0.0.1 --port 8000
 
 cd storefront
 echo "API_ORIGIN=http://127.0.0.1:8000" &gt; .env.local

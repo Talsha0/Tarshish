@@ -83,7 +83,7 @@ def test_every_shipped_plugin_is_discovered_without_touching_core(engine):
     assert engine.plugins.names("source") == ["aliexpress_mock", "aliexpress_rapidapi", "temu_mock", "temu_rapidapi"]
     assert engine.plugins.names("generator") == ["ffmpeg_video_gen", "llm_story_gen", "llm_text_gen"]
     assert engine.plugins.names("publisher") == ["console_pub", "instagram_pub", "telegram_pub"]
-    assert engine.plugins.names("storage") == ["cloud", "local"]
+    assert engine.plugins.names("storage") == ["cloud", "local", "supabase"]
     assert engine.plugins.load_errors == {}
     # core/ must not name a concrete plugin module (the dry-run publisher is a setting, not an import).
     for path in (ROOT / "core").glob("*.py"):
@@ -124,6 +124,8 @@ def test_a_new_plugin_file_is_picked_up_with_zero_core_changes(engine, tmp_path,
 
 # -- §5 / §9 database ---------------------------------------------------------------------- #
 def test_database_uses_wal_and_has_the_specified_schema(engine):
+    if engine.db.is_postgres:
+        pytest.skip("SQLite storage details; PostgreSQL's schema is checked in test_postgres.py")
     spec = {
         "categories": {"category_id", "display_name_en", "display_name_he", "temu_search_json",
                        "aliexpress_search_json", "min_rating", "min_orders", "enabled"},
@@ -307,8 +309,9 @@ def test_every_third_party_import_is_declared_in_requirements():
         "pydantic": "pydantic", "pydantic_settings": "pydantic-settings", "ruamel": "ruamel.yaml",
         "dotenv": "python-dotenv", "httpx": "httpx", "anthropic": "anthropic", "google": "google-genai",
         "streamlit": "streamlit", "pytest": "pytest", "fastapi": "fastapi", "rapidfuzz": "rapidfuzz",
+        "psycopg": "psycopg", "psycopg_pool": "psycopg-pool",
     }
-    local = {"core", "plugins", "storage", "dashboard", "api", "main", "tests", "conftest"}
+    local = {"core", "plugins", "storage", "dashboard", "storefront_api", "api", "main", "tests", "conftest", "index"}
     imported: set[str] = set()
     for path in ROOT.rglob("*.py"):
         if {".venv", "node_modules", ".next"} & set(path.parts):  # node_modules ships Python build scripts
@@ -323,8 +326,10 @@ def test_every_third_party_import_is_declared_in_requirements():
     undeclared = third_party - set(distribution_for)
     assert not undeclared, f"imports with no known requirement: {sorted(undeclared)}"
 
-    declared = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
-    declared += (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").lower()
+    declared = "".join(
+        (ROOT / name).read_text(encoding="utf-8").lower()
+        for name in ("requirements.txt", "requirements-engine.txt", "dashboard/requirements.txt", "requirements-dev.txt")
+    )
     missing = [distribution_for[name] for name in sorted(third_party) if distribution_for[name].lower() not in declared]
     assert not missing, f"add to requirements.txt: {missing}"
 

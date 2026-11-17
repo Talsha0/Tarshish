@@ -1,0 +1,104 @@
+# The Tarshish engine in production: scheduled runs against the Supabase database.
+#
+#   harvest   daily      Stage 1: fetch products for every enabled category from every store
+#   publish   daily      Stage 2: write posts for every (category, language) with an enabled account
+#                        and queue them (PUBLISHING_MODE, default "queued")
+#   worker    hourly     publish what is due in the queue, with human-like pacing, then exit
+#
+# Every repository SECRET and VARIABLE (Settings > Secrets and variables > Actions) is passed to
+# the engine as an environment variable of the same name, so the names are exactly the ones in
+# tarshish_engine/.env.example: DATABASE_URL, ANTHROPIC_API_KEY, RAPIDAPI_KEY,
+# INSTAGRAM_ACCESS_TOKEN_GADGETS_EN … Adding an account in the dashboard that names a new
+# variable only needs a new secret here, never a workflow change. DATABASE_URL is required.
+#
+# The schedule is UTC. Run any job by hand from the Actions tab ("Run workflow"); a manual run can
+# also preview with --dry-run or narrow to one category / language.
+name: Engine
+
+on:
+  schedule:
+    - cron: "17 3 * * *"     # harvest  · 05:17 / 06:17 Israel time
+    - cron: "47 3 * * *"     # publish  · 30 minutes after the harvest
+    - cron: "7 * * * *"      # worker   · every hour (posts only go out inside WORKER_ACTIVE_HOURS)
+  workflow_dispatch:
+    inputs:
+      job:
+        description: What to run
+        type: choice
+        options: [worker, harvest, publish, stats, retry-failed, verify-instagram, sync-config, seed-storefront]
+        default: worker
+      category:
+        description: "Category id (optional, e.g. gadgets)"
+        required: false
+      lang:
+        description: "Language (optional, publish only, e.g. he)"
+        required: false
+      dry_run:
+        description: "Dry run (harvest / publish: preview only, nothing is written or posted)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.job || (github.event.schedule == '17 3 * * *' && 'harvest' || (github.event.schedule == '47 3 * * *' && 'publish' || 'worker')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # One run of each job at a time; a slow publish never overlaps the next one.
+    concurrency:
+      group: engine-${{ github.event_name == 'workflow_dispatch' && inputs.job || github.event.schedule }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: tarshish_engine
+    env:
+      JOB: ${{ github.event_name == 'workflow_dispatch' && inputs.job || (github.event.schedule == '17 3 * * *' && 'harvest' || (github.event.schedule == '47 3 * * *' && 'publish' || 'worker')) }}
+      CATEGORY: ${{ inputs.category }}
+      LANG_CODE: ${{ inputs.lang }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      LOG_FILE: none
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tarshish_engine/requirements*.txt
+      - run: python -m pip install -r requirements-engine.txt
+
+      - name: Load repository secrets and variables
+        env:
+          SECRETS_JSON: ${{ toJSON(secrets) }}
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: python ../.github/scripts/export_env.py
+
+      - name: Install ffmpeg (only when video rendering is on)
+        if: env.VIDEO_RENDER_ENABLED == 'true'
+        run: command -v ffmpeg || (sudo apt-get update -q && sudo apt-get install -yq ffmpeg)
+
+      - name: Run the engine
+        run: |
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::Add the Supabase connection string as the repository secret DATABASE_URL."
+            exit 2
+          fi
+          args=()
+          case "$JOB" in
+            worker)           args=(--mode worker --once) ;;
+            harvest)          args=(--harvest) ;;
+            publish)          args=(--publish) ;;
+            stats)            args=(--stats) ;;
+            retry-failed)     args=(--retry-failed) ;;
+            verify-instagram) args=(--verify-instagram) ;;
+            sync-config)      args=(--sync-config) ;;
+            seed-storefront)  args=(--seed-storefront) ;;
+            *) echo "::error::unknown job $JOB"; exit 2 ;;
+          esac
+          if [ -n "$CATEGORY" ] && [ "$JOB" != "worker" ]; then args+=(--category "$CATEGORY"); fi
+          if [ -n "$LANG_CODE" ] && [ "$JOB" = "publish" ]; then args+=(--lang "$LANG_CODE"); fi
+          if [ "$DRY_RUN" = "true" ] && { [ "$JOB" = "harvest" ] || [ "$JOB" = "publish" ]; }; then args+=(--dry-run); fi
+          echo "python main.py ${args[*]}"
+          python main.py "${args[@]}"

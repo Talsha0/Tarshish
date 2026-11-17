@@ -22,6 +22,7 @@ Management
     python main.py --seed-storefront    # load the storefront demo catalogue
     python main.py --seed-temu --category gadgets --keyword "smart watch" --limit 10   # ad-hoc keyword harvest
     python main.py --verify-instagram [--category gadgets --lang he]   # read-only Instagram connection check
+    python main.py --import-sqlite tarshish_engine.db   # copy a local SQLite database into DATABASE_URL (Supabase)
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ or moving the project folder. Rebuild it from the project folder:
 
     python -m venv --clear .venv
     .venv\\Scripts\\activate          (Linux/macOS: source .venv/bin/activate)
-    python -m pip install -r requirements.txt
+    python -m pip install -r requirements-engine.txt
 """
 
 _APP_CONTROL_HELP = """
@@ -145,6 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
     manage.add_argument("--verify-instagram", action="store_true",
                         help="check the Instagram accounts of the matrix (token, professional account, publishing "
                              "permissions) with read-only calls; --category / --lang narrow it")
+    manage.add_argument("--import-sqlite", metavar="FILE",
+                        help="copy everything from a local SQLite database file into the configured "
+                             "DATABASE_URL (PostgreSQL / Supabase), keeping ids")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="override LOG_LEVEL")
     return parser
 
@@ -356,6 +360,33 @@ def cmd_verify_instagram(engine, category: str | None, language: str | None) -> 
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
+def cmd_import_sqlite(engine, path: str) -> bool:
+    from pathlib import Path
+
+    from core.database import Database, copy_database
+
+    source_file = Path(path).expanduser()
+    if not engine.db.is_postgres:
+        print("Set DATABASE_URL to the Supabase connection string first: --import-sqlite copies INTO it.",
+              file=sys.stderr)
+        return False
+    if not source_file.is_file():
+        print(f"No SQLite database at {source_file}.", file=sys.stderr)
+        return False
+    busy = engine.db.query_one(
+        "SELECT (SELECT COUNT(*) FROM products) AS products, (SELECT COUNT(*) FROM publications) AS publications"
+    ) or {}
+    if busy.get("products") or busy.get("publications"):
+        print(f"The {engine.db.describe()} already holds {busy['products']} product(s) and "
+              f"{busy['publications']} publication(s); import only into a fresh database.", file=sys.stderr)
+        return False
+    copied = copy_database(Database(source_file), engine.db)
+    print(f"Copied from {source_file.name} into the {engine.db.describe()}:")
+    for table, rows in copied.items():
+        print(f"  {table:<18} {rows:>7} row(s)")
+    return True
+
+
 def run_harvest(engine, args) -> int:
     reports = engine.harvester.harvest(args.category, args.source, limit=args.limit, dry_run=args.dry_run)
     for report in reports:
@@ -428,6 +459,13 @@ def main(argv: list[str] | None = None) -> int:
         # Startup validation failed: say exactly what is wrong and stop.
         print(f"\n[CONFIG ERROR] {exc}\n", file=sys.stderr)
         return EXIT_CONFIG
+    except Exception as exc:
+        from core.database import database_errors
+
+        if not isinstance(exc, database_errors()):
+            raise
+        print(f"\n[DATABASE ERROR] {exc}\nCheck DATABASE_URL (or DATABASE_PATH).\n", file=sys.stderr)
+        return EXIT_CONFIG
 
     pipeline_id = pipeline_id_for(args.category, args.lang) if args.category and args.lang else None
     try:
@@ -439,6 +477,9 @@ def main(argv: list[str] | None = None) -> int:
             return run_worker(engine, args)
 
         management, failed = False, False
+        if args.import_sqlite:
+            management = True
+            failed = not cmd_import_sqlite(engine, args.import_sqlite)
         if args.verify_instagram:
             management = True
             failed = not cmd_verify_instagram(engine, args.category, args.lang)
@@ -449,13 +490,13 @@ def main(argv: list[str] | None = None) -> int:
                   + f" from {engine.settings.config_dir} into the database.")
         if args.seed_storefront:
             management = True
-            from api.seed import seed_storefront
+            from storefront_api.seed import seed_storefront
 
             print(f"Seeded {seed_storefront(engine.db)} demo product(s) into "
-                  f"{engine.settings.database_path.name} for the storefront.")
+                  f"the {engine.db.describe()} for the storefront.")
         if args.seed_temu or args.seed_aliexpress:
             management = True
-            from api.seed import seed_aliexpress, seed_temu
+            from storefront_api.seed import seed_aliexpress, seed_temu
 
             limit = args.limit or 10
             if args.seed_temu:

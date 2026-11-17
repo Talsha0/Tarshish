@@ -19,3 +19,6 @@ __pycache__/
 
 # pytest temp files (see pytest.ini)
 .pytest_tmp/
+
+# Vercel CLI
+.vercel/

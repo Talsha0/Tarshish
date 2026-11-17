@@ -9,7 +9,7 @@ import logging
 import httpx
 import pytest
 
-from api.seed import seed_aliexpress
+from storefront_api.seed import seed_aliexpress
 from core.config import (
     DEFAULT_ALIEXPRESS_AFFILIATE_URL_TEMPLATE,
     Settings,

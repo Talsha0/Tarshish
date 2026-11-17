@@ -228,7 +228,7 @@ def test_dashboard_does_not_need_pyarrow(dashboard, monkeypatch):
 
 
 def test_kpi_tab_shows_live_storefront_clicks_per_category_and_source(dashboard):
-    from api.seed import seed_storefront
+    from storefront_api.seed import seed_storefront
 
     app, db = dashboard
     seed_storefront(db)
@@ -320,3 +320,31 @@ def test_aliexpress_provider_chain_card_shows_order_keys_and_the_last_run(dashbo
     assert any("ali_backup_unofficial" in caption.value and "4 usable product(s)" in caption.value
                for caption in app.caption)
     assert not any(key in block.value for block in app.markdown)  # variable names only, never the key
+
+
+def test_a_password_locks_the_dashboard(tmp_path, monkeypatch):
+    import streamlit as st
+
+    st.cache_resource.clear()
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "locked.db"))
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "logs" / "dashboard.log"))
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "correct horse")
+    app = AppTest.from_file(str(APP), default_timeout=120).run()
+    assert not app.exception and not app.tabs  # nothing but the sign-in form
+    app.text_input[0].input("wrong")  # a form field and its submit button go in the same run
+    app.button[0].click().run()
+    assert any("Wrong password" in error.value for error in app.error) and not app.tabs
+    app.text_input[0].input("correct horse")
+    app.button[0].click().run()
+    assert not app.exception and [tab.label for tab in app.tabs][:1] == ["Categories & Search"]
+    st.cache_resource.clear()
+
+
+def test_a_production_database_needs_a_password(tmp_path, monkeypatch):
+    import streamlit as st
+
+    st.cache_resource.clear()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pw@db.invalid:6543/postgres")
+    app = AppTest.from_file(str(APP), default_timeout=120).run()
+    assert any("DASHBOARD_PASSWORD" in error.value for error in app.error) and not app.tabs
+    st.cache_resource.clear()

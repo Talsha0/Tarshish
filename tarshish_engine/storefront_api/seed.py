@@ -108,9 +108,9 @@ def main() -> int:
     from core.config import default_env_file, load_settings
 
     settings = load_settings(default_env_file())
-    db = Database(settings.database_path)
+    db = Database.from_settings(settings)
     db.initialize()
-    print(f"Seeded {seed_storefront(db)} demo product(s) into {settings.database_path.name}.")
+    print(f"Seeded {seed_storefront(db)} demo product(s) into the {db.describe()}.")
     return 0
 
 

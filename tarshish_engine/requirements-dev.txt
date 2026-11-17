@@ -1,2 +1,3 @@
--r requirements.txt
+# Everything (engine, API, dashboard) plus the test runner.
+-r dashboard/requirements.txt
 pytest>=8.0

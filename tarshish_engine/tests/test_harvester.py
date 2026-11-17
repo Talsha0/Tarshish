@@ -21,7 +21,7 @@ def test_a_category_is_harvested_once_for_every_language(engine):
     rows = stored(engine, "gadgets")
     assert len(rows) == 3 and {row["source"] for row in rows} == {"temu_mock"}
     # Nothing in `products` is per language: the row has no language at all.
-    columns = {row["name"] for row in engine.db.query("PRAGMA table_info(products)")}
+    columns = {row["name"] for row in engine.db.table_columns("products")}
     assert "language" not in columns
 
     again = engine.harvester.harvest("gadgets", "temu_mock")[0]

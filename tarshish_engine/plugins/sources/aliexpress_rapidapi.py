@@ -50,7 +50,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -60,7 +59,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from core.config import DEFAULT_ALIEXPRESS_AFFILIATE_URL_TEMPLATE, validate_affiliate_template
-from core.database import Database, category_slug
+from core.database import Database, category_slug, database_errors
 from core.interfaces import BaseSource, PluginContext
 from core.models import Product
 from core.resilience import (
@@ -516,7 +515,7 @@ class AliExpressRapidApiSource(BaseSource):
 
     # -- SQLite ----------------------------------------------------------------------- #
     def _db(self) -> Database:
-        return Database(self.context.settings.database_path)
+        return Database.from_settings(self.context.settings)
 
     def stored_refs(self, products: Sequence[Product], *, published_by: str | None = None) -> set[str]:
         """``Product.ref`` of the given products that SQLite already knows.
@@ -538,7 +537,7 @@ class AliExpressRapidApiSource(BaseSource):
         params = [*([published_by] if published_by else []), self.source_name, *ids, *hashes]
         try:
             rows = self._db().query(sql, params)
-        except sqlite3.Error as exc:
+        except database_errors() as exc:
             logger.warning("Could not check stored products (%s); treating the batch as new.", exc)
             return set()
         stored_ids = {row["external_id"] for row in rows if row["source"] == self.source_name}
@@ -569,7 +568,7 @@ class AliExpressRapidApiSource(BaseSource):
                 "WHERE source = ? AND category = ? AND rating >= ? AND orders_count >= ?",
                 (self.source_name, category_slug(category), min_rating, min_orders),
             )
-        except sqlite3.Error as exc:
+        except database_errors() as exc:
             logger.warning("Could not read stored AliExpress products (%s).", exc)
             rows = []
         products: list[Product] = []
