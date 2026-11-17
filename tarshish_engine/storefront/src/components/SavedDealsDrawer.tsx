@@ -59,7 +59,7 @@ export function SavedDealsDrawer({ lang, open, deals, onClose, onOpenDeal, onRem
             type="button"
             data-autofocus
             onClick={onClose}
-            className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-white transition-colors hover:bg-spruce-deep"
+            className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-on-spruce transition-colors hover:bg-spruce-deep"
           >
             {t.saved.browse}
           </button>

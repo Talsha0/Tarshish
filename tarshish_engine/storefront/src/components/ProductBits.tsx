@@ -24,7 +24,7 @@ export function PriceBlock({ product, lang, size = "md" }: { product: PriceField
       {was && product.discount_percent ? (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span
-            className={`inline-flex items-center gap-1 rounded-[4px] bg-ink font-bold text-tag ${
+            className={`inline-flex items-center gap-1 rounded-[4px] bg-tag-ink font-bold text-tag ${
               size === "lg" ? "px-2 py-1 text-sm" : "px-1.5 py-0.5 text-xs"
             }`}
           >
@@ -93,7 +93,7 @@ export function StorePill({ store, className = "" }: { store: Store; className?:
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border border-line bg-surface/95 px-2 py-0.5 text-xs font-semibold text-ink ${className}`}
     >
-      <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: STORE_DOT[store.key] ?? "#0F4C3A" }} />
+      <span aria-hidden="true" className="size-1.5 rounded-full" style={{ background: STORE_DOT[store.key] ?? "rgb(var(--spruce))" }} />
       <span dir="ltr">{store.name}</span>
     </span>
   );
@@ -116,9 +116,9 @@ export function RatingPill({ rating, lang, className = "" }: { rating: number; l
 export function FlashBadge({ lang, className = "" }: { lang: Lang; className?: string }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full bg-flash py-0.5 pe-2.5 ps-2 text-xs font-bold text-white ${className}`}
+      className={`inline-flex items-center gap-1.5 rounded-full bg-flash py-0.5 pe-2.5 ps-2 text-xs font-bold text-on-flash ${className}`}
     >
-      <span aria-hidden="true" className="grid size-3.5 place-items-center rounded-full bg-white/20 motion-safe:animate-flash-pulse">
+      <span aria-hidden="true" className="grid size-3.5 place-items-center rounded-full bg-on-flash/20 motion-safe:animate-flash-pulse">
         <Zap size={10} className="fill-current" strokeWidth={0} />
       </span>
       {getDictionary(lang).card.badges.flash_deal}
@@ -166,7 +166,7 @@ export function urgencyText(label: string, lang: Lang): string {
 
 export function UrgencyChip({ label, lang, className = "" }: { label: string; lang: Lang; className?: string }) {
   return (
-    <span className={`inline-flex items-center rounded-full bg-ink px-2.5 py-0.5 text-xs font-bold text-white ${className}`}>
+    <span className={`inline-flex items-center rounded-full bg-ink px-2.5 py-0.5 text-xs font-bold text-paper ${className}`}>
       {urgencyText(label, lang)}
     </span>
   );

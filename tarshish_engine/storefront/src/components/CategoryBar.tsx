@@ -33,12 +33,12 @@ export function CategoryBar({ lang, catalog, selected, onSelect }: CategoryBarPr
             onClick={() => onSelect(pill.key)}
             className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-full border px-4 text-sm font-bold transition-colors ${
               active
-                ? "border-spruce bg-spruce text-white"
+                ? "border-spruce bg-spruce text-on-spruce"
                 : "border-line-strong bg-surface text-ink hover:border-spruce hover:text-spruce"
             }`}
           >
             {pill.label}
-            <span className={`text-xs font-semibold tabular-nums ${active ? "text-white/75" : "text-ink-faint"}`}>
+            <span className={`text-xs font-semibold tabular-nums ${active ? "text-on-spruce/75" : "text-ink-faint"}`}>
               {formatNumber(pill.count, lang)}
             </span>
           </button>

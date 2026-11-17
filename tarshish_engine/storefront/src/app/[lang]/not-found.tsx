@@ -21,7 +21,7 @@ export default function NotFound() {
       <p className="text-base text-ink-soft">{t.notFound.body}</p>
       <Link
         href={`/${lang}`}
-        className="mt-3 inline-flex h-12 items-center rounded-xl bg-spruce px-6 text-base font-bold text-white transition-colors hover:bg-spruce-deep"
+        className="mt-3 inline-flex h-12 items-center rounded-xl bg-spruce px-6 text-base font-bold text-on-spruce transition-colors hover:bg-spruce-deep"
       >
         {t.categories.allDeals}
       </Link>

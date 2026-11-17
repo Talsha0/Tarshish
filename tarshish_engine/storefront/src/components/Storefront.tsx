@@ -367,7 +367,7 @@ export function Storefront({
                 <button
                   type="button"
                   onClick={() => setReload((count) => count + 1)}
-                  className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-white hover:bg-spruce-deep"
+                  className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-on-spruce hover:bg-spruce-deep"
                 >
                   {t.results.retry}
                 </button>
@@ -385,7 +385,7 @@ export function Storefront({
                   <button
                     type="button"
                     onClick={clearFilters}
-                    className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-white hover:bg-spruce-deep"
+                    className="mt-2 inline-flex h-11 items-center rounded-[10px] bg-spruce px-5 text-sm font-bold text-on-spruce hover:bg-spruce-deep"
                   >
                     {t.filters.clear}
                   </button>
@@ -467,7 +467,7 @@ export function Storefront({
             type="button"
             data-autofocus
             onClick={() => setSheetOpen(false)}
-            className="inline-flex h-12 w-full items-center justify-center rounded-xl bg-spruce px-5 text-base font-bold text-white hover:bg-spruce-deep"
+            className="inline-flex h-12 w-full items-center justify-center rounded-xl bg-spruce px-5 text-base font-bold text-on-spruce hover:bg-spruce-deep"
           >
             {status === "loading" ? t.results.loading : t.filters.show(formatNumber(total, lang), total)}
           </button>

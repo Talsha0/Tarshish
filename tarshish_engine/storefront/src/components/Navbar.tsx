@@ -1,7 +1,7 @@
 "use client";
 
-// Top bar: brand, search, language switch (HE / EN) and the saved-deals button with its
-// counter. On phones the search field drops to its own full-width row.
+// Top bar: brand, search, language switch (HE / EN), the light/dark switch and the
+// saved-deals button with its counter. On phones the search field drops to its own full-width row.
 
 import { AnimatePresence, motion } from "framer-motion";
 import { Check, Heart, Search, X } from "lucide-react";
@@ -9,6 +9,8 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
 import { LANGS, getDictionary, switchLangPath, type Lang } from "@/lib/i18n";
+
+import { ThemeToggle } from "./ThemeToggle";
 
 type NavbarProps = {
   lang: Lang;
@@ -32,7 +34,7 @@ export function Navbar({ lang, query, onQueryChange, searchPlaceholder, savedCou
     <header className="sticky top-0 z-40 border-b border-line bg-surface/95 backdrop-blur supports-[backdrop-filter]:bg-surface/85">
       <a
         href="#deals"
-        className="sr-only focus:not-sr-only focus:absolute focus:start-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-ink focus:px-3 focus:py-2 focus:text-sm focus:font-semibold focus:text-white"
+        className="sr-only focus:not-sr-only focus:absolute focus:start-4 focus:top-3 focus:z-50 focus:rounded-lg focus:bg-ink focus:px-3 focus:py-2 focus:text-sm focus:font-semibold focus:text-paper"
       >
         {t.nav.skip}
       </a>
@@ -117,6 +119,8 @@ export function Navbar({ lang, query, onQueryChange, searchPlaceholder, savedCou
             )}
           </nav>
 
+          <ThemeToggle label={t.nav.darkMode} />
+
           <button
             type="button"
             onClick={onOpenSaved}
@@ -134,7 +138,7 @@ export function Navbar({ lang, query, onQueryChange, searchPlaceholder, savedCou
                   animate={{ scale: 1, opacity: 1 }}
                   exit={{ scale: 0.4, opacity: 0 }}
                   transition={{ type: "spring", stiffness: 520, damping: 22 }}
-                  className="absolute -end-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-ink px-1 text-[0.7rem] font-bold leading-none text-white"
+                  className="absolute -end-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-ink px-1 text-[0.7rem] font-bold leading-none text-paper"
                 >
                   {savedCount > 99 ? "99+" : savedCount}
                 </motion.span>

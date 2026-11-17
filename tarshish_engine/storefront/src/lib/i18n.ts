@@ -50,6 +50,7 @@ const en = {
     language: "Language",
     saved: "Saved deals",
     savedCount: (count: number) => `Saved deals: ${count}`,
+    darkMode: "Dark mode",
   },
   hero: {
     headline: "Deals worth the click.",
@@ -236,6 +237,7 @@ const he: Dictionary = {
     language: "שפה",
     saved: "דילים שמורים",
     savedCount: (count: number) => `דילים שמורים: ${count}`,
+    darkMode: "מצב כהה",
   },
   hero: {
     headline: "דילים ששווה ללחוץ עליהם.",

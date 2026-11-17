@@ -127,7 +127,7 @@ export function ProductCard({
           <button
             type="button"
             onClick={() => onGetDeal(product)}
-            className="relative z-10 inline-flex h-10 items-center justify-center rounded-[10px] border border-spruce/25 bg-spruce-tint/60 px-3 text-sm font-bold text-spruce transition-colors hover:border-spruce hover:bg-spruce hover:text-white"
+            className="relative z-10 inline-flex h-10 items-center justify-center rounded-[10px] border border-spruce/25 bg-spruce-tint/60 px-3 text-sm font-bold text-spruce transition-colors hover:border-spruce hover:bg-spruce hover:text-on-spruce"
           >
             {t.card.getDeal}
           </button>

@@ -105,7 +105,7 @@ function Panel({ onClose, labelledBy, placement = "center", dir, className = "",
     >
       <motion.div
         aria-hidden="true"
-        className="absolute inset-0 bg-spruce-deep/50 backdrop-blur-sm"
+        className="absolute inset-0 bg-scrim/50 backdrop-blur-sm"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}

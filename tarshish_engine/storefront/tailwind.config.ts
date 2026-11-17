@@ -5,18 +5,32 @@ import type { Config } from "tailwindcss";
 // One idea carries the look: the yellow shelf label. Everything a shopper should act on
 // (the live price) sits on `tag`; everything that vouches for it is `spruce`; the rest
 // stays quiet on cool paper. `flash` is reserved for time-limited deals.
+//
+// The values are RGB triplets in src/app/globals.css, light by default and dark from the
+// system setting or <html data-theme="dark">. `on-*` is the text colour for a filled
+// `bg-*` of the same name; `hero` is the banner, which stays deep green in both themes.
+const rgb = (name: string) => `rgb(var(--${name}) / <alpha-value>)`;
+
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
+  // `dark:` follows the system unless <html data-theme> forces a theme (same rule as the CSS tokens).
+  darkMode: [
+    "variant",
+    ["@media (prefers-color-scheme: dark) { &:not([data-theme=light] *) }", "&:is([data-theme=dark] *)"],
+  ],
   theme: {
     extend: {
       colors: {
-        paper: "#F3F5F2",
-        surface: "#FFFFFF",
-        ink: { DEFAULT: "#14241F", soft: "#4F5E58", faint: "#84908B" },
-        line: { DEFAULT: "#DBE1DD", strong: "#C3CCC7" },
-        spruce: { DEFAULT: "#0F4C3A", deep: "#0A3729", bright: "#16795B", tint: "#E3EEE8" },
-        tag: { DEFAULT: "#FFD43B", deep: "#EFB900", ink: "#1D1700" },
-        flash: { DEFAULT: "#D3243B", tint: "#FCE9EB" },
+        paper: rgb("paper"),
+        surface: rgb("surface"),
+        ink: { DEFAULT: rgb("ink"), soft: rgb("ink-soft"), faint: rgb("ink-faint") },
+        line: { DEFAULT: rgb("line"), strong: rgb("line-strong") },
+        spruce: { DEFAULT: rgb("spruce"), deep: rgb("spruce-deep"), bright: rgb("spruce-bright"), tint: rgb("spruce-tint") },
+        tag: { DEFAULT: rgb("tag"), deep: rgb("tag-deep"), ink: rgb("tag-ink") },
+        flash: { DEFAULT: rgb("flash"), tint: rgb("flash-tint") },
+        on: { spruce: rgb("on-spruce"), flash: rgb("on-flash") },
+        hero: rgb("hero"),
+        scrim: rgb("scrim"),
         // Admin portal: light/dark tokens defined as RGB triplets in src/app/admin/admin.css.
         adm: {
           bg: "rgb(var(--adm-bg) / <alpha-value>)",

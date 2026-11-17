@@ -3,10 +3,76 @@
 @tailwind utilities;
 
 @layer base {
+  /* Colour tokens as RGB triplets (Tailwind's paper, ink, spruce… in tailwind.config.ts). Light by
+     default, dark from the system setting, and either one forced by <html data-theme="…">, which the
+     theme button in the navbar sets. The yellow shelf label keeps its colours in both themes. */
   :root {
     color-scheme: light;
-    --tag: #ffd43b;
-    --tag-deep: #efb900;
+    --paper: 243 245 242;
+    --surface: 255 255 255;
+    --ink: 20 36 31;
+    --ink-soft: 79 94 88;
+    --ink-faint: 132 144 139;
+    --line: 219 225 221;
+    --line-strong: 195 204 199;
+    --spruce: 15 76 58;
+    --spruce-deep: 10 55 41;
+    --spruce-bright: 22 121 91;
+    --spruce-tint: 227 238 232;
+    --tag: 255 212 59;
+    --tag-deep: 239 185 0;
+    --tag-ink: 29 23 0;
+    --flash: 211 36 59;
+    --flash-tint: 252 233 235;
+    --on-spruce: 255 255 255;
+    --on-flash: 255 255 255;
+    --hero: 15 76 58;
+    --scrim: 10 55 41;
+    --shimmer: rgba(255, 255, 255, 0.75);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: 12 18 16;
+      --surface: 21 29 26;
+      --ink: 230 237 234;
+      --ink-soft: 167 181 175;
+      --ink-faint: 122 137 131;
+      --line: 41 53 49;
+      --line-strong: 60 75 70;
+      --spruce: 88 201 160;
+      --spruce-deep: 122 220 184;
+      --spruce-bright: 110 214 176;
+      --spruce-tint: 23 49 40;
+      --flash: 255 107 125;
+      --flash-tint: 58 26 32;
+      --on-spruce: 5 33 24;
+      --on-flash: 42 6 12;
+      --hero: 18 52 42;
+      --scrim: 0 0 0;
+      --shimmer: rgba(255, 255, 255, 0.06);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: 12 18 16;
+    --surface: 21 29 26;
+    --ink: 230 237 234;
+    --ink-soft: 167 181 175;
+    --ink-faint: 122 137 131;
+    --line: 41 53 49;
+    --line-strong: 60 75 70;
+    --spruce: 88 201 160;
+    --spruce-deep: 122 220 184;
+    --spruce-bright: 110 214 176;
+    --spruce-tint: 23 49 40;
+    --flash: 255 107 125;
+    --flash-tint: 58 26 32;
+    --on-spruce: 5 33 24;
+    --on-flash: 42 6 12;
+    --hero: 18 52 42;
+    --scrim: 0 0 0;
+    --shimmer: rgba(255, 255, 255, 0.06);
   }
 
   html {
@@ -25,8 +91,8 @@
   }
 
   ::selection {
-    background: var(--tag);
-    color: #1d1700;
+    background: rgb(var(--tag));
+    color: rgb(var(--tag-ink));
   }
 
   input[type="number"] {
@@ -56,13 +122,13 @@
     gap: 0.12em;
     padding-block: 0.2em 0.24em;
     padding-inline: calc(var(--point) + 0.72em) 0.6em;
-    background: var(--tag);
-    color: #1d1700;
+    background: rgb(var(--tag));
+    color: rgb(var(--tag-ink));
     font-weight: 800;
     line-height: 1.1;
     font-variant-numeric: tabular-nums lining-nums;
     white-space: nowrap;
-    box-shadow: inset 0 -0.11em 0 var(--tag-deep);
+    box-shadow: inset 0 -0.11em 0 rgb(var(--tag-deep));
     clip-path: polygon(var(--point) 0, 100% 0, 100% 100%, var(--point) 100%, 0 50%);
     -webkit-mask-image: radial-gradient(circle at calc(var(--point) + 0.18em) 50%, transparent 0.15em, #000 0.17em);
     mask-image: radial-gradient(circle at calc(var(--point) + 0.18em) 50%, transparent 0.15em, #000 0.17em);
@@ -99,7 +165,7 @@
     position: absolute;
     inset: 0;
     transform: translateX(-100%);
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.75), transparent);
+    background: linear-gradient(90deg, transparent, var(--shimmer), transparent);
     animation: shimmer 1.5s ease-in-out infinite;
   }
   [dir="rtl"] .skeleton::after {

@@ -30,7 +30,7 @@ export function Hero({ lang, category, catalog, featured, onOpen }: HeroProps) {
   const others = category ? (catalog?.categories.filter((entry) => entry.key !== category) ?? []) : [];
 
   return (
-    <section className="bg-spruce text-white">
+    <section className="bg-hero text-white">
       <div className="mx-auto grid max-w-shell items-center gap-8 px-4 py-9 sm:px-6 sm:py-12 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] lg:gap-14 lg:py-14">
         <div>
           {hub ? (

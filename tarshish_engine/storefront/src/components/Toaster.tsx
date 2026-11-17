@@ -63,11 +63,11 @@ export function Providers({ children }: { children: ReactNode }) {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: 8, scale: 0.96 }}
                 transition={{ type: "spring", stiffness: 500, damping: 34 }}
-                className="pointer-events-auto flex max-w-sm items-center gap-2.5 rounded-xl bg-ink px-4 py-3 text-sm font-semibold text-white shadow-panel"
+                className="pointer-events-auto flex max-w-sm items-center gap-2.5 rounded-xl bg-ink px-4 py-3 text-sm font-semibold text-paper shadow-panel"
               >
                 <span
                   className={`grid size-5 shrink-0 place-items-center rounded-full ${
-                    toast.tone === "ok" ? "bg-tag text-tag-ink" : "bg-flash text-white"
+                    toast.tone === "ok" ? "bg-tag text-tag-ink" : "bg-flash text-on-flash"
                   }`}
                 >
                   {toast.tone === "ok" ? <Check size={13} strokeWidth={3.5} /> : <CircleAlert size={13} strokeWidth={3} />}

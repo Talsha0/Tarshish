@@ -124,7 +124,7 @@ export function RedirectConfirmModal({ lang, product, couponCopied, referrerPath
               data-autofocus
               onClick={continueToStore}
               disabled={opening}
-              className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-spruce px-6 text-base font-bold text-white transition-colors hover:bg-spruce-deep disabled:opacity-80"
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-spruce px-6 text-base font-bold text-on-spruce transition-colors hover:bg-spruce-deep disabled:opacity-80"
             >
               {opening ? t.redirect.opening : t.redirect.confirm}
               {opening ? (

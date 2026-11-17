@@ -249,7 +249,7 @@ export function QuickViewModal({
                       type="button"
                       onClick={() => onCopyCoupon(product)}
                       className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-[10px] px-3.5 text-sm font-bold transition-colors ${
-                        couponCopied ? "bg-spruce text-white" : "border border-spruce/35 bg-surface text-spruce hover:border-spruce"
+                        couponCopied ? "bg-spruce text-on-spruce" : "border border-spruce/35 bg-surface text-spruce hover:border-spruce"
                       }`}
                     >
                       {couponCopied ? <Check aria-hidden="true" size={16} strokeWidth={3} /> : <Copy aria-hidden="true" size={16} />}
@@ -310,7 +310,7 @@ export function QuickViewModal({
               type="button"
               data-autofocus
               onClick={() => onGetDeal(product)}
-              className="inline-flex h-12 min-w-0 flex-1 items-center justify-center rounded-xl bg-spruce px-5 text-base font-bold text-white transition-colors hover:bg-spruce-deep"
+              className="inline-flex h-12 min-w-0 flex-1 items-center justify-center rounded-xl bg-spruce px-5 text-base font-bold text-on-spruce transition-colors hover:bg-spruce-deep"
             >
               <span className="truncate">{t.quickView.cta(store)}</span>
             </button>

@@ -3,6 +3,7 @@ import { Assistant, Frank_Ruhl_Libre } from "next/font/google";
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
 
+import { THEME_SCRIPT } from "@/components/ThemeToggle";
 import { Providers } from "@/components/Toaster";
 import { LANGS, dirOf, getDictionary, isLang } from "@/lib/i18n";
 
@@ -52,13 +53,23 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
   };
 }
 
-export const viewport: Viewport = { themeColor: "#0F4C3A", colorScheme: "light" };
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#0F4C3A" },
+    { media: "(prefers-color-scheme: dark)", color: "#0C1210" },
+  ],
+  colorScheme: "light dark",
+};
 
 export default async function LangLayout({ children, params }: LayoutProps) {
   const { lang } = await params;
   if (!isLang(lang)) notFound();
   return (
-    <html lang={lang} dir={dirOf(lang)} className={`${sans.variable} ${display.variable}`}>
+    // suppressHydrationWarning: THEME_SCRIPT may set data-theme on <html> before React hydrates.
+    <html lang={lang} dir={dirOf(lang)} className={`${sans.variable} ${display.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="min-h-dvh">
         <Providers>{children}</Providers>
       </body>
