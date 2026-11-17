@@ -264,9 +264,11 @@ ones its API supports. Details worth knowing:
 
 ### Instagram publisher (`instagram_pub`)
 
-Publishes through the Instagram Graph API in two steps (create a media container, then publish it);
-video content becomes a Reel once Meta has processed it. It needs an Instagram business account and a
-token with `instagram_content_publish`. Credentials come from `INSTAGRAM_ACCESS_TOKEN` and
+Publishes through Meta's **Instagram API with Unified Login** (`https://graph.facebook.com/v21.0`, token in an
+`Authorization: Bearer` header) in two steps: create a media container, poll its `status_code` with
+exponential backoff until `FINISHED`, then `media_publish` it. It needs a Professional (Business or Creator)
+account linked to a Meta Business Portfolio (no Facebook Page) and a Business Integration / System User token
+with `instagram_business_basic` and `instagram_business_content_publish`. Credentials come from `INSTAGRAM_ACCESS_TOKEN` and
 `INSTAGRAM_BUSINESS_ACCOUNT_ID`, or from the variables a social page names:
 
 ```json
@@ -280,6 +282,15 @@ token with `instagram_content_publish`. Credentials come from `INSTAGRAM_ACCESS_
 * Without credentials the page is skipped with a warning and the other targets still run. To preview
   the exact Instagram caption and media URL in a dry-run, set `DRY_RUN_PUBLISHER=instagram_pub`.
 * `INSTAGRAM_GRAPH_API_VERSION` selects the Graph API version (default `v21.0`).
+* Formats: a page's `content_type` option picks `image`/`post` (feed photo), `video`/`reel` (Reel) or
+  `story` (`media_type=STORIES`, image or video). Without it, video content becomes a Reel and anything else
+  an image post. Stories take **no caption** (Meta rejects the field), so text must be baked into the media.
+  To post feed + Story, list two Instagram pages, e.g. `page_name: "gadgets_story", content_type: "story"`.
+* Meta errors are decoded (`error.code` / `error_subcode`) into a next step: expired token (190/463),
+  missing permission (10, 200–299), unreachable media URL (9004/2207052), daily publishing limit (2207042)…
+* `python main.py --verify-instagram [--pipeline ID]` (or **Test Instagram Connection** in the dashboard)
+  checks the token (`/debug_token`, falling back to `/me/permissions`), the account type and both
+  permissions with read-only calls, and prints `Connected as @user | BUSINESS | Permissions: ✓ … ✓ …`.
 
 ## Resilience
 
@@ -339,6 +350,7 @@ The suite needs no network, API keys or `.env`. Every test gets its own temporar
 | `test_config.py`, `test_resilience.py` | Startup validation, secret rejection, redaction, retries, budget guard |
 | `test_dashboard.py` | The Streamlit app end to end: every tab, dry-run, the pipeline form, enable toggle, queue actions, storefront clicks, and rendering without `pyarrow` |
 | `test_storefront.py` | Schema migration, the seeder, search (typos, Hebrew), every API endpoint, click tracking, click metrics |
+| `test_instagram_publisher.py` | Instagram Unified Login: feed image, Reel backoff, Story image/video (no caption), Meta error hints, `--verify-instagram` and the dashboard button |
 | `test_temu_instagram.py` | Temu source (one request, local filtering, retries, background jobs, key redaction), `--seed-temu`, Instagram publisher (image, Reel, dry-run, errors), the `gadgets_he` pipeline |
 | `test_temu_failover.py` | Temu provider chain: the 429 ➔ empty ➔ success failover, every failure mode, key fallback and exhausted-key memory, the four adapters, chain-file validation, key masking, the CLI summary |
 

@@ -12,6 +12,8 @@ Examples
     python main.py --seed-storefront                                 # load the storefront demo catalogue
     python main.py --seed-temu --category gadgets --keyword "smart gadgets" --limit 10
                                                                      # real Temu products via the provider chain, no LLM
+    python main.py --verify-instagram                                # read-only Instagram token / account / permission check
+    python main.py --verify-instagram --pipeline gadgets_he          # check that pipeline's Instagram pages
 """
 
 from __future__ import annotations
@@ -114,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--job", metavar="ID",
         help="with --seed-temu: collect the results of an earlier search job instead of starting a new search",
     )
+    manage.add_argument(
+        "--verify-instagram", action="store_true",
+        help="check the Instagram API with Unified Login connection (token, professional account, publishing "
+             "permissions) with read-only calls; with --pipeline, check that pipeline's Instagram pages",
+    )
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="override LOG_LEVEL")
     return parser
 
@@ -214,6 +221,30 @@ def print_temu_seed(report, limit: int) -> None:
     print(_RULE)
 
 
+def cmd_verify_instagram(engine, pipeline_id: str | None) -> bool:
+    """Print a read-only connection report for each Instagram account; True when all are ready."""
+    from plugins.publishers.instagram_pub import pages_to_verify, verify_pages
+
+    pages = pages_to_verify(engine.registry, pipeline_id)
+    print(_RULE)
+    scope = f"pipeline {pipeline_id}" if pipeline_id else "configured accounts"
+    print(f" Instagram API with Unified Login · connection check · {scope} · nothing is posted")
+    if not pages:
+        print(f"   ! Pipeline {pipeline_id} has no instagram_pub social page.")
+        print(_RULE)
+        return False
+    results = verify_pages(engine.registry, pages)
+    for result in results:
+        print(f"   {'✓' if result.ok else '✗'} {result.page_name}: {result.summary()}")
+        for line in result.lines():
+            print(f"       {line}")
+    ready = all(result.ok for result in results)
+    print(" Ready for live publishing." if ready else
+          " Not ready: fix the ✗ items above (see setup_roadmap.html, \"Instagram API with Unified Login Setup\").")
+    print(_RULE)
+    return ready
+
+
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
@@ -281,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run or args.mode:
             parser.error("--seed-temu makes real API requests and writes products; "
                          "it cannot be combined with --dry-run or --mode")
+    elif args.verify_instagram and (args.dry_run or args.mode or args.limit or args.force):
+        parser.error("--verify-instagram only reads from the API; it takes --pipeline and nothing else")
     elif args.category or args.keyword or args.job:
         parser.error("--category, --keyword and --job only apply to --seed-temu")
 
@@ -300,7 +333,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     try:
-        management, seed_failed = False, False
+        management, failed = False, False
+        if args.verify_instagram:
+            management = True
+            failed = not cmd_verify_instagram(engine, args.pipeline)
         if args.sync_config:
             management = True
             print(f"Synced {engine.registry.sync_from_yaml()} pipeline(s) from "
@@ -318,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
             limit = args.limit or 10
             report = seed_temu(engine, category=args.category, keyword=args.keyword, limit=limit, job_id=args.job)
             print_temu_seed(report, limit)
-            seed_failed = report.provider is None
+            failed = failed or report.provider is None
         if args.flush_queue:
             management = True
             print(f"Flushed {engine.db.flush_queue(args.pipeline)} pending/queued publication(s).")
@@ -333,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             management = True
             cmd_stats(engine, args.pipeline)
         if management:
-            return EXIT_FAILURES if seed_failed else EXIT_OK
+            return EXIT_FAILURES if failed else EXIT_OK
         if args.mode == "worker":
             return run_worker(engine, args)
         return run_pipelines(engine, args)

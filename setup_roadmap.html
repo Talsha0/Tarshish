@@ -17,6 +17,8 @@
     --p1-soft: #d9eeec;
     --p2: #b4621b;
     --p2-soft: #f6e4d2;
+    --p3: #a8326e;
+    --p3-soft: #f6dde9;
     --code-bg: #121c26;
     --code-ink: #e6edf3;
     --code-line: #263544;
@@ -39,6 +41,8 @@
       --p1-soft: #173a3b;
       --p2: #e39b52;
       --p2-soft: #3d2b19;
+      --p3: #e57fb2;
+      --p3-soft: #3d1a2c;
       --code-bg: #0a1017;
       --code-ink: #e6edf3;
       --code-line: #263544;
@@ -111,6 +115,7 @@
   /* ── Phases ──────────────────────────────────────────────────────────── */
   .phase { --accent: var(--p1); --accent-soft: var(--p1-soft); counter-reset: step; margin-top: 52px; }
   .phase[data-phase="2"] { --accent: var(--p2); --accent-soft: var(--p2-soft); }
+  .phase[data-phase="ig"] { --accent: var(--p3); --accent-soft: var(--p3-soft); }
   .phase-head { border-top: 3px solid var(--accent); padding-top: 16px; }
   .phase-head .kicker { color: var(--accent); font-weight: 700; }
   h2 { font-family: var(--serif); font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; margin: 4px 0 8px; }
@@ -161,6 +166,7 @@
   .step-num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 6px; }
   .phase[data-phase="1"] .step-num::before { content: "1." counter(step); }
   .phase[data-phase="2"] .step-num::before { content: "2." counter(step); }
+  .phase[data-phase="ig"] .step-num::before { content: "IG." counter(step); }
   .step-body p { margin: 8px 0 0; }
   .step-body p.done-when {
     margin-top: 12px; padding: 8px 12px; border-radius: 8px;
@@ -276,6 +282,7 @@
       <ul>
         <li>Claude and Gemini captions</li>
         <li>Telegram publisher</li>
+        <li>Instagram publisher (feed posts, Reels, Stories) and its live connection check</li>
       </ul>
       <p style="margin:8px 0 0;font-size:.86rem;color:var(--muted)">Tested against stand-ins only. Phase 2 is their first contact with the real services.</p>
     </div>
@@ -290,7 +297,7 @@
       <h3>➕ Not built yet</h3>
       <ul>
         <li>Real product sources</li>
-        <li>TikTok, Instagram, YouTube publishers</li>
+        <li>TikTok, YouTube publishers</li>
         <li>Automatic metrics collection</li>
         <li>Dashboard login</li>
       </ul>
@@ -879,8 +886,136 @@ npm run start</code></pre></div>
     </ol>
   </section>
 
+  <!-- ═══════════════════ INSTAGRAM API WITH UNIFIED LOGIN ═══════════════════ -->
+  <section class="phase" data-phase="ig" id="instagram-setup">
+    <div class="phase-head">
+      <div class="kicker">Publisher setup · Meta</div>
+      <h2>Instagram API with Unified Login Setup (Meta Developer Portal)</h2>
+      <p class="phase-intro">Manual steps for the system administrator before <code>instagram_pub</code> can publish
+        feed posts, Reels and Stories. All of it happens in Meta's portals except the last three steps. No Facebook Page
+        is needed: a Meta Business Portfolio and a Professional Instagram account are enough. The engine calls
+        <code>https://graph.facebook.com/v21.0</code> with the token in an <code>Authorization: Bearer</code> header.</p>
+      <div class="phase-progress">
+        <div class="meter" data-meter="ig"><span></span></div>
+        <span class="count" data-count="ig">0 of 0</span>
+      </div>
+    </div>
+
+    <ol class="steps">
+      <li class="step" data-step="ig-professional">
+        <input class="step-check" type="checkbox" id="cb-ig-professional">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-professional"><span class="step-num"></span> Switch the account to a
+            Professional account and link it to a Business Portfolio</label>
+          <p>In the Instagram app: <strong>Settings → Account type and tools → Switch to professional account</strong>,
+            and choose <strong>Business</strong> or <strong>Creator</strong>. Then, in
+            <a href="https://business.facebook.com/settings">Meta Business Settings</a>, open
+            <strong>Accounts → Instagram accounts → Add</strong> and connect the account to your
+            <strong>Meta Business Portfolio</strong>. No Facebook Page is required.</p>
+          <p class="done-when"><strong>Done when:</strong> the account is listed under Instagram accounts in your Business
+            Portfolio and the Instagram app shows a professional dashboard.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-app">
+        <input class="step-check" type="checkbox" id="cb-ig-app">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-app"><span class="step-num"></span> Create or open your app and add the
+            Instagram API with Unified Login product</label>
+          <p>In the <a href="https://developers.facebook.com/apps">Meta App Dashboard</a>
+            (<code>developers.facebook.com</code>), create a <strong>Business</strong> app owned by the same Business
+            Portfolio, or open the existing one. Under <strong>Add products</strong>, add
+            <strong>Instagram API with Unified Login</strong>.</p>
+          <p class="done-when"><strong>Done when:</strong> the product appears in the app's left-hand menu.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-config">
+        <input class="step-check" type="checkbox" id="cb-ig-config">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-config"><span class="step-num"></span> Create a Business Integration
+            Configuration with the two publishing permissions</label>
+          <p>In the product's settings, create a <strong>Business Integration Configuration</strong> (Facebook Login for
+            Business) that requests exactly these permissions:</p>
+          <div class="cmd"><pre><code>instagram_business_basic
+instagram_business_content_publish</code></pre></div>
+          <p class="note">While the app is in Development mode only people with a role on the app can authorise it. Meta's
+            App Review for these permissions is needed only before other businesses use your app.</p>
+          <p class="done-when"><strong>Done when:</strong> the configuration is saved and lists both permissions.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-token">
+        <input class="step-check" type="checkbox" id="cb-ig-token">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-token"><span class="step-num"></span> Obtain the long-lived token and
+            the Instagram account id</label>
+          <p>Either complete the Unified Login OAuth flow with the configuration above, or (recommended for a server)
+            in <strong>Business Settings → Users → System users</strong> create a System User, assign it the app and the
+            Instagram account, and <strong>Generate new token</strong> with the two permissions. System User tokens can
+            be set never to expire.</p>
+          <p>The account id (<code>INSTAGRAM_BUSINESS_ACCOUNT_ID</code>) is the Instagram account's numeric
+            <em>IG User</em> id, usually starting with <code>178414</code>. It is shown under the Instagram account in
+            Business Settings, or returned by the Graph API Explorer for the token.</p>
+          <p class="note">Treat the token like a password: never paste it into <code>config/pipelines.yaml</code>, the
+            dashboard, a chat or a commit.</p>
+          <p class="done-when"><strong>Done when:</strong> you hold a token that Meta's
+            <a href="https://developers.facebook.com/tools/debug/accesstoken/">Access Token Debugger</a> shows as valid
+            with both permissions, and the numeric account id.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-env">
+        <input class="step-check" type="checkbox" id="cb-ig-env">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-env"><span class="step-num"></span> Add the credentials to
+            <code>.env</code></label>
+          <div class="cmd"><pre><code>INSTAGRAM_ACCESS_TOKEN=EAAG...
+INSTAGRAM_BUSINESS_ACCOUNT_ID=17841400000000000</code></pre></div>
+          <p>The <code>gadgets_he</code> pipeline already references these two variable names. To publish Stories as
+            well as feed posts, add a second Instagram social page with the option <code>content_type: "story"</code>
+            (or <code>"reel"</code> for Reels only); the engine reads every value from <code>.env</code> and masks the
+            token as <code>[REDACTED]</code> in logs.</p>
+          <p class="note">Restart the dashboard after editing <code>.env</code>; it reads the file at startup.</p>
+          <p class="done-when"><strong>Done when:</strong> a dry-run of <code>gadgets_he</code> prints no "skipped"
+            warning for <code>instagram_pub</code>.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-media">
+        <input class="step-check" type="checkbox" id="cb-ig-media">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-media"><span class="step-num"></span> Make product media publicly
+            reachable over HTTPS</label>
+          <p>Meta's servers download the <code>image_url</code> / <code>video_url</code> themselves, so each URL must
+            answer over <strong>HTTPS</strong> with no login, cookies or redirect to a login page. Feed images: JPEG, up
+            to 8 MB, aspect ratio 4:5 to 1.91:1. Reels and Stories: MP4/MOV (H.264 + AAC), 9:16. Stories take
+            <strong>no caption</strong>, so any price or "link in bio" text must be baked into the image or video.</p>
+          <div class="cmd"><pre><code>curl -I https://your-media-host.example/product.jpg</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the command above, run from outside your network, returns
+            <code>200</code> with an <code>image/jpeg</code> (or <code>video/mp4</code>) content type.</p>
+        </div>
+      </li>
+
+      <li class="step" data-step="ig-verify">
+        <input class="step-check" type="checkbox" id="cb-ig-verify">
+        <div class="step-body">
+          <label class="step-title" for="cb-ig-verify"><span class="step-num"></span> Verify the connection before
+            enabling live publishing <span class="tag live">read-only live call</span></label>
+          <p>This checks the token, the Professional account type and both permissions. It never posts anything. The
+            dashboard's <strong>Test Instagram Connection</strong> button on the Pipelines tab runs the same check.</p>
+          <div class="cmd"><pre><code>python main.py --verify-instagram
+python main.py --verify-instagram --pipeline gadgets_he</code></pre></div>
+          <p class="done-when"><strong>Done when:</strong> the report reads
+            <code>Connected as @your_account | BUSINESS | Permissions: ✓ instagram_business_basic, ✓ instagram_business_content_publish</code>
+            and ends with <code>Ready for live publishing.</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
   <footer>
-    Last revised 16 November 2026. Command reference and architecture notes:
+    Last revised 17 November 2026. Command reference and architecture notes:
     <code>tarshish_engine/README.md</code>.
   </footer>
 </div>

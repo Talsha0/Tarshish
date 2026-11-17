@@ -568,6 +568,29 @@ def render_temu_provider_chain(engine: Engine) -> None:
         st.caption(f"Order and endpoints: `{source}`. Keys are read from `.env`; restart the dashboard after changing it.")
 
 
+def render_instagram_connection(engine: Engine) -> None:
+    """A read-only check of every Instagram account the pipelines publish to (nothing is posted)."""
+    try:
+        from plugins.publishers.instagram_pub import pages_to_verify, verify_pages
+    except ImportError:  # the Instagram publisher was removed: nothing to show
+        return
+
+    with st.container(border=True):
+        head = st.columns([3, 1], vertical_alignment="center")
+        head[0].markdown("**Instagram API with Unified Login**")
+        head[0].caption("Read-only: checks the token, the professional account and the publishing permissions.")
+        if head[1].button("Test Instagram Connection", key="verify_instagram", width="stretch"):
+            with st.spinner("Asking graph.facebook.com…"):
+                st.session_state["instagram_check"] = [
+                    {"ok": r.ok, "page": r.page_name, "summary": r.summary(), "lines": r.lines()}
+                    for r in verify_pages(engine.registry, pages_to_verify(engine.registry))
+                ]
+        for result in st.session_state.get("instagram_check", []):
+            show = st.success if result["ok"] else st.error
+            show(f"{result['page']}: {redact(result['summary'])}")
+            st.code(redact("\n".join(result["lines"])), language=None)
+
+
 def render_pipelines_tab(engine: Engine) -> None:
     pipelines = engine.registry.list_pipelines()
     st.subheader("Pipeline architecture")
@@ -578,6 +601,8 @@ def render_pipelines_tab(engine: Engine) -> None:
         render_pipeline_card(engine, pipeline)
     if any(pipeline.source == "temu_rapidapi" for pipeline in pipelines):
         render_temu_provider_chain(engine)
+    if any(page.platform == "instagram_pub" for pipeline in pipelines for page in pipeline.social_pages):
+        render_instagram_connection(engine)
     st.divider()
     render_pipeline_form(engine, pipelines)
 
