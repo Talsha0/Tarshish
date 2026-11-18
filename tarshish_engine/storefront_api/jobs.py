@@ -1,10 +1,10 @@
-"""Background jobs for the web admin: run CLI commands without holding an HTTP request open.
+"""Background jobs for the HTTP admin API: run CLI commands without holding an HTTP request open.
 
 Every admin action that can take longer than a request (harvest, publish, verify, seed, the
 queue worker) becomes a *job*: a row in ``job_runs`` plus one task on a single worker thread.
 The job runs the very same code as ``python main.py …`` (``main.dispatch``) against the API's
 engine, and everything that code prints, and every engine log record it emits, is appended to
-the job's log. The admin portal polls ``GET /api/admin/jobs/{id}`` to stream it.
+the job's log. Clients poll ``GET /api/admin/jobs/{id}`` to stream it.
 
 Design notes
 ------------

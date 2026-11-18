@@ -1,15 +1,15 @@
-// FindHub storefront + Tarshish admin portal.
+// FindHub storefront: the public, consumer-facing deal catalogue. Nothing administrative lives here;
+// operators use the Streamlit dashboard (tarshish_engine/dashboard/app.py).
 //
-// The browser only ever talks to this Next.js server, so the storefront, the admin portal and the
-// API share one domain (clean bio links, no CORS, no backend URL in the page):
+// The browser only ever talks to this Next.js server, so the storefront and its API share one domain
+// (clean bio links, no CORS, no backend URL in the page):
 //
 //   /api/backend/:path*  -> BACKEND_API_URL/api/:path*   public API (products, categories, clicks)
 //   /api/:path*          -> BACKEND_API_URL/api/:path*   the same, the storefront's original paths
 //   /media/:path*        -> BACKEND_API_URL/media/:path*  generated FindHub promotional images (public, so Meta
 //                           and TikTok can download them from the storefront's own HTTPS domain)
-//   /api/backend/admin/* -> src/app/api/backend/admin/[...path]/route.ts — NOT a plain rewrite: that
-//                           route checks the admin session cookie and adds the X-Admin-Key header on
-//                           the server, so ADMIN_API_SECRET never reaches a browser.
+//
+// The backend's admin API (/api/admin/*) is deliberately NOT proxied: the public domain never fronts it.
 //
 // BACKEND_API_URL is where the FastAPI backend listens (API_ORIGIN is still accepted). Locally
 // http://127.0.0.1:8000 — 127.0.0.1 rather than "localhost" because Node may resolve localhost
@@ -39,25 +39,14 @@ const nextConfig = {
   poweredByHeader: false,
   turbopack: { root: import.meta.dirname },
   async headers() {
-    return [
-      { source: "/:path*", headers: securityHeaders },
-      // The admin portal is never cached or indexed.
-      {
-        source: "/admin/:path*",
-        headers: [
-          { key: "Cache-Control", value: "no-store" },
-          { key: "X-Robots-Tag", value: "noindex, nofollow" },
-        ],
-      },
-    ];
+    return [{ source: "/:path*", headers: securityHeaders }];
   },
   async redirects() {
     // Hebrew is the default storefront language.
     return [{ source: "/", destination: "/he", permanent: false }];
   },
   async rewrites() {
-    // Applied after static files and routes but before dynamic routes, so the admin paths are
-    // excluded here explicitly: they must reach the authenticated route handler instead.
+    // Only the public API and media are proxied; any admin path is excluded, so it 404s here.
     return [
       { source: "/api/backend/:path((?!admin(?:/|$)).*)", destination: `${BACKEND}/api/:path` },
       { source: "/api/:path((?!backend(?:/|$)|admin(?:/|$)).*)", destination: `${BACKEND}/api/:path` },

@@ -586,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
 def dispatch(engine, args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> int:
     """Run validated CLI arguments against a bootstrapped engine and return the exit code.
 
-    Shared by the command line and the web admin (``storefront_api/admin.py``), which runs the
+    Shared by the command line and the HTTP admin API (``storefront_api/admin.py``), which runs the
     same commands as background jobs and records what they print.
     """
     from core.orchestrator import pipeline_id_for

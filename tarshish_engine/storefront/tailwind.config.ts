@@ -31,22 +31,6 @@ const config: Config = {
         on: { spruce: rgb("on-spruce"), flash: rgb("on-flash") },
         hero: rgb("hero"),
         scrim: rgb("scrim"),
-        // Admin portal: light/dark tokens defined as RGB triplets in src/app/admin/admin.css.
-        adm: {
-          bg: "rgb(var(--adm-bg) / <alpha-value>)",
-          panel: "rgb(var(--adm-panel) / <alpha-value>)",
-          raised: "rgb(var(--adm-raised) / <alpha-value>)",
-          line: "rgb(var(--adm-line) / <alpha-value>)",
-          ink: "rgb(var(--adm-ink) / <alpha-value>)",
-          soft: "rgb(var(--adm-soft) / <alpha-value>)",
-          faint: "rgb(var(--adm-faint) / <alpha-value>)",
-          accent: "rgb(var(--adm-accent) / <alpha-value>)",
-          "accent-ink": "rgb(var(--adm-accent-ink) / <alpha-value>)",
-          ok: "rgb(var(--adm-ok) / <alpha-value>)",
-          warn: "rgb(var(--adm-warn) / <alpha-value>)",
-          bad: "rgb(var(--adm-bad) / <alpha-value>)",
-          console: "rgb(var(--adm-console) / <alpha-value>)",
-        },
       },
       fontFamily: {
         sans: ["var(--font-sans)", "IBM Plex Sans Hebrew", "system-ui", "Segoe UI", "Arial", "sans-serif"],

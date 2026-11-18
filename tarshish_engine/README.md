@@ -178,7 +178,8 @@ Streamlit's basic widgets plus HTML for tables and bars, so it does not need `py
 
 ## FindHub live content (generated assets)
 
-Branded copy + images for **real** products only, inspected in the admin before anything is posted.
+Branded copy + images for **real** products only, inspected in the dashboard's **Content Review** before
+anything is posted.
 
 ```bash
 python main.py --generate-assets --category gadgets --lang he                       # every content type, 3 products each
@@ -210,14 +211,14 @@ python main.py --publish-assets 12,13                                           
 * **Storage:** `generated_assets` (product, category, language, platform, content type, target account
   `<category>:<language>:<platform>` + handle, text, image path/URL, `links_payload_json`, `llm_model_used`,
   `DRAFT | QUEUED | PUBLISHED | FAILED`). QUEUED when the social account exists, DRAFT otherwise.
-* **Publishing** (admin *Approve & Publish Now*, or `--publish-assets`): Telegram `sendMessage`; Instagram image
+* **Publishing** (dashboard *Approve & Publish Now*, or `--publish-assets`): Telegram `sendMessage`; Instagram image
   post / Story via the Graph API; TikTok Direct Post with `media_type=PHOTO` (`PULL_FROM_URL` — the media host
   must be verified for the TikTok app). Platform limits: Meta's API cannot attach Story **link stickers** (the
   sticker links stay on the asset; post from the app and use *Posted manually*), and Instagram only accepts
   **video** for Reels, so static `instagram_reel` assets are refused until video rendering is enabled.
-* **Admin:** *Content & queue* shows every asset as a card — thumbnail with full-resolution lightbox, destination
-  badges (platform, handle, category, language), caption, link preview, model — with *Generate Batch Now*,
-  per-item and bulk publish, Draft/Queue, *Posted manually* and delete.
+* **Review:** the dashboard's *Content Review* tab shows each asset on a phone in its platform's skin, with
+  destination badges (platform, handle, category, language, model), the editable caption and its links, and
+  *Save Caption Edits*, *Approve & Publish Now* and *Delete / Discard*.
 
 ## FindHub storefront
 

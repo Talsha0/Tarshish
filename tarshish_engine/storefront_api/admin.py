@@ -2,8 +2,9 @@
 
 Mounted under ``/api/admin`` by :func:`storefront_api.server.create_app`. Every request must
 carry ``X-Admin-Key: <ADMIN_API_SECRET>``; without ``ADMIN_API_SECRET`` in the environment the
-whole admin API answers 503. The Next.js admin portal (``storefront/src/app/admin``) adds the
-header on the server side, so the secret never reaches a browser.
+whole admin API answers 503. It is meant for scripts that call the backend directly: the public
+storefront has no admin pages and never proxies ``/api/admin``, and operators use the Streamlit
+dashboard (``dashboard/app.py``), which drives the engine in-process.
 
 CLI parity
 ----------
