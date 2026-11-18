@@ -7,8 +7,10 @@ The content profile's ``llm_model`` selects the provider:
 * ``mock``                                 -> offline Hebrew/English templates (free)
 * ``provider:model`` forces a provider for ids that do not start with claude-/gemini-
 
-When the provider's API key is absent the generator falls back to the offline
-templates automatically, so a fresh checkout works without any credentials.
+When the provider's API key is absent (or its SDK is not installed) the generator asks the
+free-tier LLM chain instead (Gemini -> Groq -> OpenRouter, ``free_llm_chain.py``) and raises a
+notice saying so; with no free key either, or no free model left with quota, the offline templates
+write the copy. A fresh checkout therefore works without any credentials.
 Every paid call is preceded by the monthly budget check and wrapped in
 exponential-backoff retries.
 
@@ -44,6 +46,7 @@ _PROVIDER_ALIASES = {
     "mock": "mock", "offline": "mock", "template": "mock", "none": "mock",
 }
 _API_KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
+FREE_KEY_ENVS = ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY")
 
 # --------------------------------------------------------------------------- #
 # Pricing — USD per 1M tokens (input, output). The longest matching prefix wins.
@@ -155,6 +158,27 @@ def resolve_model(spec: str | None, get_env: Any) -> tuple[str, str]:
             else get_env("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
         )
     return provider, model
+
+
+def key_fallback_notice(llm_model: str | None, settings: Any) -> str | None:
+    """What a live run does instead when ``llm_model``'s API key is missing, or ``None`` when it is set.
+
+    Shown before a run (dashboard, dry-runs) so nobody is surprised that a free model wrote the copy.
+    """
+    from plugins.generators.free_llm_chain import FreeLLMChain
+
+    provider, model = resolve_model(llm_model, settings.get_env)
+    if provider == "mock":
+        return None
+    secret = settings.anthropic_api_key if provider == "anthropic" else settings.gemini_api_key
+    if secret is not None and secret.get_secret_value().strip():
+        return None
+    env = _API_KEY_ENV[provider]
+    if FreeLLMChain(settings).configured():
+        return (f"{env} is not set: live runs replace {model} with the free LLM chain "
+                "(Gemini -> Groq -> OpenRouter free tiers).")
+    return (f"{env} is not set and no free LLM key is set ({', '.join(FREE_KEY_ENVS)}): live runs replace "
+            f"{model} with the offline templates.")
 
 
 # --------------------------------------------------------------------------- #
@@ -353,6 +377,7 @@ class LLMTextGenerator(BaseGenerator):
         self._price_overrides = self._load_price_overrides()
         self._clients: dict[str, Any] = {}
         self._warned: set[str] = set()
+        self._chain: Any = None
 
     @property
     def generator_name(self) -> str:
@@ -375,11 +400,7 @@ class LLMTextGenerator(BaseGenerator):
 
         api_key = self._api_key()
         if not api_key:
-            self._warn_once(
-                f"{_API_KEY_ENV[self._provider]} is not set — using the offline template writer "
-                f"instead of {self._model}."
-            )
-            return self._offline(product, language)
+            return self._free_fallback(product, language, prompt_template, f"{_API_KEY_ENV[self._provider]} is not set")
 
         # Guardrail: never start a paid request once the monthly cap is reached.
         if self.context.budget_guard is not None:
@@ -388,8 +409,8 @@ class LLMTextGenerator(BaseGenerator):
         try:
             client = self._client(api_key)
         except ImportError as exc:
-            self._warn_once(f"SDK for provider '{self._provider}' is not installed ({exc}); using offline templates.")
-            return self._offline(product, language)
+            return self._free_fallback(product, language, prompt_template,
+                                       f"the SDK for provider '{self._provider}' is not installed ({exc})")
 
         user_prompt = build_user_prompt(
             product, language, prompt_template, tone=self.context.options.get("tone"),
@@ -554,6 +575,43 @@ class LLMTextGenerator(BaseGenerator):
             caption=caption, hashtags=hashtags, model_used=model_used,
         ))
 
+    def _free_fallback(self, product: Product, language: str, prompt_template: str | None, why: str) -> GeneratedContent:
+        """The configured model cannot be called: ask the free-tier chain, else the offline templates."""
+        from plugins.generators.free_llm_chain import FreeLLMChainExhausted
+
+        chain = self._free_chain()
+        if not chain.configured():
+            self._warn_once(f"{why} and no free LLM key is set ({', '.join(FREE_KEY_ENVS)}): the offline templates "
+                            f"wrote the copy instead of {self._model}.")
+            return self._offline(product, language)
+        user_prompt = build_user_prompt(
+            product, language, prompt_template, tone=self.context.options.get("tone"),
+            default_template=self.default_prompt_template,
+        )
+        try:
+            result = chain.complete(SYSTEM_PROMPT, user_prompt, validate=lambda text: parse_caption_json(text) is not None,
+                                    max_tokens=min(self._max_tokens, 2048))
+        except FreeLLMChainExhausted as exc:
+            self._warn_once(f"{why}, and no free LLM could answer ({exc}): the offline templates wrote the copy "
+                            f"instead of {self._model}.")
+            return self._offline(product, language)
+        caption, hashtags = parse_caption_json(result.text) or ("", [])
+        self._warn_once(f"{why}: {self._model} was replaced by the free LLM {result.label}. Add the key to write "
+                        f"with {self._model}.")
+        return self.finish(GeneratedContent(
+            product=product, content_type=self.content_type, language=language, caption=caption,
+            hashtags=hashtags or self.offline_write(product, language)[1],
+            model_used=f"{result.label} [free fallback for {self._model}]",
+            tokens_input=result.tokens_input, tokens_output=result.tokens_output, generation_cost_usd=0.0,
+        ))
+
+    def _free_chain(self) -> Any:
+        if self._chain is None:
+            from plugins.generators.free_llm_chain import FreeLLMChain
+
+            self._chain = FreeLLMChain(self.context.settings)
+        return self._chain
+
     def _api_key(self) -> str | None:
         settings = self.context.settings
         secret = settings.anthropic_api_key if self._provider == "anthropic" else settings.gemini_api_key
@@ -564,11 +622,17 @@ class LLMTextGenerator(BaseGenerator):
             return OFFLINE_MODEL
         if self._api_key():
             return f"{OFFLINE_MODEL} [dry-run stand-in for {self._model}]"
+        notice = key_fallback_notice(self.context.llm_model, self.context.settings)
+        if notice:
+            self._warn_once(notice)
+        if self._free_chain().configured():
+            return f"{OFFLINE_MODEL} [{_API_KEY_ENV[self._provider]} not set: live runs use the free LLM chain]"
         return f"{OFFLINE_MODEL} [{_API_KEY_ENV[self._provider]} not set: live runs also use templates]"
 
     def _warn_once(self, message: str) -> None:
         if message not in self._warned:
             self._warned.add(message)
+            self.notices.append(message)
             logger.warning(message)
 
     def _int_env(self, name: str, default: int) -> int:

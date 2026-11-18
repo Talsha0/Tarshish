@@ -451,7 +451,9 @@ def test_gadgets_posts_and_stories_go_out_with_their_own_models(engine, temu_api
 
     report = engine.orchestrator.run("gadgets", "he", ["instagram_post", "instagram_story"], mode="immediate", limit=1)
 
-    assert report.ok and report.count("published") == 2 and not report.warnings
+    assert report.ok and report.count("published") == 2
+    # No Claude key in tests: the only warnings say which models the offline templates stood in for.
+    assert all("ANTHROPIC_API_KEY is not set" in warning for warning in report.warnings)
     assert {(r.content_type, r.generator, r.llm_model) for r in report.routes} == {
         ("instagram_post", "llm_text_gen", "claude-sonnet-5-5"), ("instagram_story", "llm_story_gen", "claude-haiku-5-5"),
     }

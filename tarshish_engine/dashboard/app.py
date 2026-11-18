@@ -599,6 +599,21 @@ def render_profile_form(engine: Engine, profile: ContentProfile | None) -> None:
         st.rerun()
 
 
+def render_model_key_warnings(engine: Engine, profiles: list[ContentProfile]) -> None:
+    """Warn, per model, when its API key is missing and what a live run will use instead."""
+    from plugins.generators.llm_text_gen import key_fallback_notice
+
+    by_notice: dict[str, list[str]] = {}
+    for profile in profiles:
+        if not profile.enabled:
+            continue
+        notice = key_fallback_notice(profile.llm_model, engine.settings)
+        if notice:
+            by_notice.setdefault(notice, []).append(profile.content_type)
+    for notice, content_types in by_notice.items():
+        st.warning(f"{', '.join(content_types)}: {notice}", icon="⚠️")
+
+
 def render_content_tab(engine: Engine) -> None:
     profiles = engine.registry.list_content_profiles()
     st.subheader("Content types & AI model assignment")
@@ -611,6 +626,7 @@ def render_content_tab(engine: Engine) -> None:
          "publish_format": "Format", "tone": "Tone", "enabled": "Enabled"},
         clipped=("tone",),
     )
+    render_model_key_warnings(engine, profiles)
     for profile in profiles:
         with st.expander(f"{profile.content_type} · {profile.generator} · {profile.llm_model}"):
             render_profile_form(engine, profile)
@@ -1243,6 +1259,8 @@ def render_review_panel(review: ContentReview, item: ReviewItem, keys: list[str]
     }
     st.markdown('<dl class="tsh-meta">' + "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items())
                 + "</dl>", unsafe_allow_html=True)
+    if "[free fallback for " in item.model:
+        st.caption("⚠️ Written by a free LLM: the configured model's API key was not set when this was generated.")
     if item.not_sent_reason:
         st.warning(f"Not sent — stored for review only: {item.not_sent_reason} Publish Now works once the "
                    "account's credentials are set.", icon="📥")

@@ -205,7 +205,7 @@ variable (e.g. `INSTAGRAM_ACCESS_TOKEN_SPORTS_EN`) only needs a new secret here.
 | `DATABASE_URL` | **yes** | step 1 |
 | `RAPIDAPI_KEY` (+ `RAPIDAPI_KEY_TEMU_*`, `RAPIDAPI_KEY_ALI_*`) | for harvesting | |
 | `TEMU_TRACKING_ID`, `ALIEXPRESS_TRACKING_ID` | for affiliate links | |
-| `ANTHROPIC_API_KEY` and/or `GEMINI_API_KEY` | for AI captions | without them, offline templates |
+| `ANTHROPIC_API_KEY` and/or `GEMINI_API_KEY` | for AI captions | without them, the free LLM chain (`GROQ_API_KEY` / `OPENROUTER_API_KEY` / `GEMINI_API_KEY`) writes instead, with a warning; with no key at all, offline templates |
 | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID`, `…_GADGETS_EN`, `TG_*` … | per account | the names in the Social Accounts matrix |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` (+ `…_GADGETS_EN`) | for YouTube Shorts | OAuth refresh token per channel, `youtube.upload` scope |
 | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN_*`, `TIKTOK_REFRESH_TOKEN_*` | for TikTok | the refresh token keeps the 24-hour access token fresh on scheduled runs |

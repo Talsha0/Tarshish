@@ -321,6 +321,10 @@ class PublishingOrchestrator:
                     detail=redact(f"{type(exc).__name__}: {exc}"),
                 )
             report.items.append(outcome)
+        for notice in getattr(generator, "notices", []):  # e.g. the model's key is missing: a free model wrote it
+            message = f"{profile.content_type}: {notice}"
+            if message not in report.warnings:
+                report.warnings.append(message)
 
     def _process(
         self, report: RunReport, account: SocialAccount, profile: ContentProfile, page: SocialPage,

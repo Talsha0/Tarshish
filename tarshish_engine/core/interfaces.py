@@ -73,6 +73,9 @@ class BaseGenerator(ABC):
 
     def __init__(self, context: PluginContext) -> None:
         self.context = context
+        # Operator-facing warnings raised while generating (e.g. "the model's API key is missing, a free
+        # model wrote this instead"); the orchestrator copies them onto the run report.
+        self.notices: list[str] = []
 
     @property
     @abstractmethod

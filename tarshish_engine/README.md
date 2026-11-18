@@ -337,6 +337,14 @@ A content profile's `llm_model` accepts a model id or an alias:
 | `claude-…` / `gemini-…` | That exact model |
 | `mock` | Free offline templates |
 
+**No key for the chosen model?** When `ANTHROPIC_API_KEY` (for `claude-…`) or `GEMINI_API_KEY` (for
+`gemini-…`) is not set, a live run does not stop: the free-tier chain (Gemini ➔ Groq ➔ OpenRouter, keys
+`GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY`) writes the copy with the same prompt, at no cost, and
+the run report warns about it (dashboard run result, CLI `!` lines). `model_used` reads e.g.
+`groq:llama-3.3-70b-versatile [free fallback for claude-sonnet-5-5]`, and Content Review marks such posts. With no
+free key either, or no free model left with quota, the offline templates write it (also with a warning). The
+Content Types tab and dry-runs warn ahead of time which models will be replaced.
+
 Cheaper Claude options: `claude-sonnet-5-5`, `claude-haiku-5-5`. For models that support it the
 Anthropic request enables server-side refusal fallback (`fallbacks: "default"`) and runs at
 `effort: low` (`ANTHROPIC_EFFORT`). Prices live in `MODEL_PRICING` in
@@ -600,7 +608,8 @@ can load in one environment and be blocked in the next.
   `pip.exe`, `streamlit.exe` and `pytest.exe` launchers.
 * The dashboard avoids Streamlit's dataframe, data-editor and chart elements, so it does not need `pyarrow`,
   the library blocked most often.
-* If an LLM SDK cannot be imported, the generator says so and falls back to the offline templates.
+* If an LLM SDK cannot be imported, the generator says so and falls back to the free LLM chain (offline templates
+  when no free key is set).
 
 **If a library the engine cannot do without is blocked** (for example `pydantic_core`):
 
