@@ -318,7 +318,7 @@ def test_queue_retry_publish_now_and_delete(api, harvested, console_route):
     assert api.post("/api/admin/queue/flush", headers=KEY, json={}).json() == {"flushed": 0}
 
 
-def test_queue_items_carry_preview_fields_and_captions_can_be_edited(api, harvested, console_route):
+def test_queued_captions_can_be_edited_until_published(api, harvested, console_route):
     job = run_job(api, api.post("/api/admin/actions/publish", headers=KEY, json={
         "category_id": "gadgets", "language": "he", "content_types": ["console_post"], "mode": "queued", "limit": 2,
     }))
@@ -326,20 +326,13 @@ def test_queue_items_carry_preview_fields_and_captions_can_be_edited(api, harves
     items = api.get("/api/admin/queue", params={"status": "QUEUED"}, headers=KEY).json()["items"]
     assert len(items) == 2
     first, second = items
-    assert "content_json" not in first
-    assert set(first["preview"]) >= {"hashtags", "image_url", "video_url", "affiliate_url", "price", "currency"}
-    assert first["preview"]["affiliate_url"].startswith("http")
-    preview = first["preview"]
-    assert preview["post_text"] == first["caption"] + preview["post_suffix"]  # what the publisher will send
-    assert preview["affiliate_url"] in preview["post_suffix"]
+    assert "content_json" not in first and "preview" not in first
 
     edited = api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "  כותרת חדשה 🔥  "})
     assert edited.status_code == 200, edited.text
     assert edited.json() == {"id": first["id"], "caption": "כותרת חדשה 🔥", "status": "QUEUED"}
     row = api.ctx.engine().db.get_publication(first["id"])
     assert row["caption"] == "כותרת חדשה 🔥" and json.loads(row["content_json"])["caption"] == "כותרת חדשה 🔥"
-    refreshed = {i["id"]: i for i in api.get("/api/admin/queue", headers=KEY).json()["items"]}[first["id"]]
-    assert refreshed["preview"]["post_text"] == "כותרת חדשה 🔥" + preview["post_suffix"]
 
     assert api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "   "}).status_code == 422
     assert api.patch(f"/api/admin/queue/{first['id']}", headers=KEY, json={"caption": "x", "status": "PUBLISHED"}).status_code == 422
@@ -354,7 +347,7 @@ def test_queue_items_carry_preview_fields_and_captions_can_be_edited(api, harves
 
 
 # --------------------------------------------------------------------------- #
-# Generated assets: edit from the preview simulator, delete with orphan-media cleanup
+# Generated assets: edit, delete with orphan-media cleanup
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def media_api(make_settings, monkeypatch, tmp_path):

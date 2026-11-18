@@ -158,10 +158,21 @@ python -m streamlit run dashboard/app.py     # same thing; prefer this form on W
 4. **Run Pipelines & KPIs** — run a targeted pipeline (category, language, content types, dry-run on by
    default, mode, products per type) and read its routing table and the generated captions; the harvested
    inventory; then **KPIs & Budget** (views, clicks, revenue, net profit, monthly AI spend vs.
-   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform, content type and pipeline, storefront click-throughs)
-   and **Queue & Logs** (queued / published / failed, retry, flush, worker pass, redacted log tail).
+   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform, content type and pipeline, storefront click-throughs),
+   **Content Review** (below) and **Queue & Logs** (queued / published / failed, retry, flush, worker pass,
+   redacted log tail).
 
-Deep links: `?tab=categories`, `?tab=accounts`, `?tab=content`, `?tab=run`. Restart the dashboard after
+**Content Review** is the Mobile Device Preview Simulator: every unpublished post (FindHub assets in
+`DRAFT` / `QUEUED` / `FAILED` and the pipeline's queue) on a 375×812 smartphone, in the skin of the platform
+it goes to: Instagram feed post, Instagram Story with its clickable link stickers, Reels / TikTok / YouTube
+Shorts, and the Telegram channel post with its `View on FindHub` / `Direct Deal` buttons. Hebrew posts render
+right-to-left. Filter by source, category, language and platform, step through items with Prev / Next (or
+← / →), edit the caption and watch the phone update, then **Save Caption Edits**, **Approve & Publish Now**
+(posts immediately through the platform's publisher plugin and shows the post id or the error) or
+**Delete / Discard** (removes the record and its image from `static/generated_media/` unless another post
+uses it). The rules live in `services/content_review.py`, which the admin API's edit/delete routes share.
+
+Deep links: `?tab=categories`, `?tab=accounts`, `?tab=content`, `?tab=run`, `?tab=review`. Restart the dashboard after
 editing `.env`. The dashboard has no login: keep it on `localhost` or behind a tunnel. It uses only
 Streamlit's basic widgets plus HTML for tables and bars, so it does not need `pyarrow` to load.
 

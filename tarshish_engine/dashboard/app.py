@@ -14,7 +14,8 @@ Tabs
 2. Social Accounts       — the category × language × platform matrix: handles, .env variable names, on/off
 3. Content Types & AI    — generator + LLM model + tone per content type (instagram_post, instagram_story…)
 4. Run Pipelines & KPIs  — targeted publishing runs (Stage 2, dry-run by default), inventory, KPIs,
-                           budget, queue and logs
+                           budget, Content Review (every unpublished post on a phone: edit, publish
+                           now, discard), queue and logs
 
 The page talks to the same engine objects as the CLI (``core`` + ``MetricsService``),
 and configuration is read from SQLite on every rerun, so edits apply immediately.
@@ -54,15 +55,23 @@ from core.config import (  # noqa: E402
 )
 from core.models import category_slug  # noqa: E402
 from core.resilience import ConfigError, TarshishError, redact  # noqa: E402
+from dashboard.components.mobile_simulator import mobile_device_simulator  # noqa: E402
 from dashboard.metrics_service import MetricsService  # noqa: E402
+from services.content_review import (  # noqa: E402
+    ContentReview,
+    ReviewError,
+    ReviewItem,
+    utf16_length,
+)
 
 TAB_CATEGORIES = "Categories & Search"
 TAB_ACCOUNTS = "Social Accounts"
 TAB_CONTENT = "Content Types & AI Models"
 TAB_RUN = "Run Pipelines & KPIs"
-TAB_KPIS, TAB_QUEUE = "KPIs & Budget", "Queue & Logs"   # inside Tab 4
+TAB_KPIS, TAB_REVIEW, TAB_QUEUE = "KPIs & Budget", "Content Review", "Queue & Logs"   # inside Tab 4
 _TAB_SLUGS = {"categories": TAB_CATEGORIES, "accounts": TAB_ACCOUNTS, "content": TAB_CONTENT, "run": TAB_RUN,
-              "kpis": TAB_RUN, "queue": TAB_RUN}
+              "kpis": TAB_RUN, "review": TAB_RUN, "queue": TAB_RUN}
+_INNER_TAB_SLUGS = {"kpis": TAB_KPIS, "review": TAB_REVIEW, "queue": TAB_QUEUE}
 NEW_CATEGORY = "➕ Add a new category"
 SELECT_CATEGORY = "_select_category"  # category to show in the form on the next draw
 NO_FORMAT = "(publisher decides)"
@@ -119,6 +128,20 @@ st.markdown(
                       border-left: 1px solid rgba(128,128,128,.55); }
       .tsh-bar-fill { height: 16px; min-width: 2px; border-radius: 0 4px 4px 0; }
       .tsh-bar-value { font-size: .8rem; opacity: .78; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+      .tsh-meta { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: .86rem; margin: 6px 0 4px; }
+      .tsh-meta dt { opacity: .62; }
+      .tsh-meta dd { margin: 0; word-break: break-word; }
+      .tsh-links { font-size: .84rem; line-height: 1.6; margin: 0 0 4px; padding-inline-start: 18px; }
+      .tsh-links a { word-break: break-all; }
+      .st-key-review_editor_rtl textarea { direction: rtl; text-align: right; }
+      .st-key-review_editor_ltr textarea { unicode-bidi: plaintext; }
+      .st-key-review_publish button { background: #1a7f37; border-color: #1a7f37; color: #fff; }
+      .st-key-review_publish button:hover { background: #116329; border-color: #116329; color: #fff; }
+      .st-key-review_publish button:disabled { background: rgba(26,127,55,.35); border-color: transparent; color: rgba(255,255,255,.8); }
+      .st-key-review_delete button { color: #cf222e; border-color: rgba(207,34,46,.55); }
+      .st-key-review_delete_confirm button { background: #cf222e; border-color: #cf222e; color: #fff; }
+      .st-key-review_delete_confirm button:hover { background: #a40e26; border-color: #a40e26; color: #fff; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -695,9 +718,12 @@ def render_run_tab(engine: Engine, metrics: MetricsService) -> None:
                {"category": "Category", "source": "Source", "products": "Products", "last_harvest": "Last harvest"},
                formats={"last_harvest": lambda value: local_time(engine, value)}, numeric=("products",))
     st.divider()
-    kpis, queue = st.tabs([TAB_KPIS, TAB_QUEUE])
+    inner = _INNER_TAB_SLUGS.get(str(st.query_params.get("tab", "")).lower(), TAB_KPIS)
+    kpis, review, queue = st.tabs([TAB_KPIS, TAB_REVIEW, TAB_QUEUE], default=inner)
     with kpis:
         render_kpis_tab(engine, metrics)
+    with review:
+        render_review_tab(engine)
     with queue:
         render_queue_tab(engine)
 
@@ -1085,6 +1111,222 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
     )
     render_storefront_clicks(engine, metrics)
     render_metrics_entry(engine)
+
+
+# --------------------------------------------------------------------------- #
+# Content Review — every unpublished post on a phone: edit, publish now, discard
+# --------------------------------------------------------------------------- #
+REVIEW_PICK = "review_pick"            # selectbox: the item on the phone
+REVIEW_GOTO = "_review_goto"           # item to select on the next run (after a publish or delete)
+REVIEW_FLASH = "_review_flash"
+REVIEW_SOURCES = {"all": "All sources", "asset": "Generated assets", "publication": "Pipeline queue"}
+STATUS_COLORS = {"DRAFT": "gray", "QUEUED": "blue", "PENDING": "orange", "FAILED": "red"}
+ANY = "Any"
+
+
+def review_text_key(item_key: str) -> str:
+    return f"review_text::{item_key}"
+
+
+def review_item_label(item: ReviewItem) -> str:
+    title = item.product_title if len(item.product_title) <= 46 else item.product_title[:45] + "…"
+    return f"{'Asset' if item.source == 'asset' else 'Queue'} #{item.id} · {item.type_label} · {item.language} · {title}"
+
+
+def review_flash(message: str, kind: str = "success") -> None:
+    st.session_state[REVIEW_FLASH] = (kind, message)
+
+
+def step_review(keys: list[str], offset: int) -> None:
+    """Prev / Next (a callback, so it may set the selectbox before it is drawn)."""
+    current = st.session_state.get(REVIEW_PICK)
+    index = keys.index(current) if current in keys else 0
+    st.session_state[REVIEW_PICK] = keys[(index + offset) % len(keys)]
+
+
+def neighbour(keys: list[str], key: str) -> str | None:
+    """The item to show once ``key`` leaves the list: the next one, else the previous one."""
+    rest = [k for k in keys if k != key]
+    if not rest:
+        return None
+    index = keys.index(key) if key in keys else 0
+    return rest[min(index, len(rest) - 1)]
+
+
+def review_links(item: ReviewItem) -> str:
+    links = [
+        ("FindHub category page", item.links.storefront_url), ("FindHub product page", item.links.product_url),
+        ("Direct deal (affiliate)", item.links.affiliate_url),
+    ]
+    if item.links.bio_cta and item.links.bio_link:
+        links.append((f"Link in bio → {item.links.bio_link}", item.links.bio_link))
+    links += [(f"Story sticker “{sticker['label']}”", sticker["url"]) for sticker in item.links.stickers]
+    rows = [f'<li>{esc(label)}: <a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(url)}</a></li>'
+            for label, url in links if url]
+    return f'<ul class="tsh-links">{"".join(rows)}</ul>' if rows else ""
+
+
+def render_review_tab(engine: Engine) -> None:
+    review = ContentReview(engine)
+    st.subheader("Content Review")
+    st.caption("Every unpublished post (FindHub assets in DRAFT, QUEUED or FAILED and the pipeline's queue) on a "
+               "phone, in the skin of the platform it goes to. Edit the caption, then approve & publish now, save, "
+               "or discard it.")
+    kind, message = st.session_state.pop(REVIEW_FLASH, (None, None))
+    if message:
+        getattr(st, kind)(message)
+        st.toast(message, icon="✅" if kind == "success" else "⚠️")
+
+    everything = review.items(include_failed=True)
+    filters = st.columns([1.3, 1.2, 1, 1.2, 1.1])
+    source = filters[0].selectbox("Source", list(REVIEW_SOURCES), format_func=REVIEW_SOURCES.get, key="review_source")
+    categories = sorted({item.category_id for item in everything})
+    category = filters[1].selectbox("Category", [ANY, *categories], key="review_category")
+    languages = sorted({item.language for item in everything})
+    language = filters[2].selectbox("Language", [ANY, *languages], key="review_language",
+                                    format_func=lambda value: LANGUAGE_LABELS.get(value, value))
+    platforms = sorted({item.platform for item in everything})
+    platform = filters[3].selectbox("Platform", [ANY, *platforms], key="review_platform")
+    include_failed = filters[4].toggle("Include failed", value=True, key="review_failed")
+    items = [item for item in everything
+             if (source == "all" or item.source == source) and category in (ANY, item.category_id)
+             and language in (ANY, item.language) and platform in (ANY, item.platform)
+             and (include_failed or item.status != "FAILED")]
+    if not items:
+        st.info("Nothing is waiting for review with these filters. Generate assets or queue a pipeline run first.")
+        return
+
+    by_key = {item.key: item for item in items}
+    keys = list(by_key)
+    goto = st.session_state.pop(REVIEW_GOTO, None)
+    if goto in by_key:
+        st.session_state[REVIEW_PICK] = goto
+    if st.session_state.get(REVIEW_PICK) not in by_key:
+        st.session_state[REVIEW_PICK] = keys[0]
+
+    left, right = st.columns([1.2, 1], gap="large")
+    with left:
+        nav = st.columns([1.3, 5, 1.3], vertical_alignment="bottom")
+        nav[0].button("Prev", key="review_prev", help="Previous item (←)", on_click=step_review, args=(keys, -1),
+                      disabled=len(keys) < 2, width="stretch", shortcut="Left")
+        nav[1].selectbox(f"Item ({len(keys)} waiting)", keys, key=REVIEW_PICK,
+                         format_func=lambda key: review_item_label(by_key[key]))
+        nav[2].button("Next", key="review_next", help="Next item (→)", on_click=step_review, args=(keys, 1),
+                      disabled=len(keys) < 2, width="stretch", shortcut="Right")
+        item = by_key[st.session_state[REVIEW_PICK]]
+        render_review_panel(review, item, keys)
+    with right:
+        text = st.session_state.get(review_text_key(item.key), item.text)
+        dark = st.toggle("Dark appearance", key="review_dark", help="Instagram feed and Telegram follow the phone's theme.")
+        mobile_device_simulator(item, item.post_text(text), review=review, appearance="dark" if dark else "light")
+
+
+def render_review_panel(review: ContentReview, item: ReviewItem, keys: list[str]) -> None:
+    badges = [f":violet-badge[{item.type_label}]", f":{STATUS_COLORS.get(item.status, 'gray')}-badge[{item.status}]",
+              f":gray-badge[{'Generated asset' if item.source == 'asset' else 'Pipeline queue'} #{item.id}]",
+              f":gray-badge[{'RTL' if item.dir == 'rtl' else 'LTR'}]"]
+    st.markdown(" ".join(badges))
+    account = item.target_account or "—"
+    meta = {
+        "Target account": f"{item.handle} ({account})" if item.target_account else f"{item.handle} · no account linked",
+        "Category": item.category_id, "Language": LANGUAGE_LABELS.get(item.language, item.language),
+        "Platform": item.platform_label, "LLM model": item.model or "—", "Product": item.product_title,
+        "Created": local_time(review.engine, item.created_at),
+    }
+    st.markdown('<dl class="tsh-meta">' + "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items())
+                + "</dl>", unsafe_allow_html=True)
+    if item.error_message:
+        st.error(f"Last attempt failed: {item.error_message}")
+
+    labels = {"generated_text": "Post text", "reel_caption": "Reel caption", "caption": "Caption"}
+    text_key = review_text_key(item.key)
+    if text_key not in st.session_state:
+        st.session_state[text_key] = item.text
+    with st.container(key=f"review_editor_{item.dir}"):  # Hebrew captions are edited right-to-left
+        text = st.text_area(
+            labels[item.text_field], key=text_key, height=260, disabled=not item.can_edit, persist_state="page",
+            help="Ctrl+Enter or clicking outside updates the phone. Edits stay here until you save or publish.",
+        )
+    text = text if text is not None else item.text
+    dirty = item.can_edit and text.strip() != item.text.strip()
+    length = utf16_length(item.post_text(text))
+    limit = item.caption_limit
+    over = limit is not None and length > limit
+    status = f"{length:,}" + (f" / {limit:,} characters" if limit else " characters") + (" — over the limit" if over else "")
+    st.caption(("⚠️ " if over else "") + status + (" · unsaved edits" if dirty else ""))
+    if item.suffix.strip():
+        with st.expander("Appended by the publisher (shown on the phone)"):
+            st.markdown(f'<div class="tsh-caption" dir="{item.dir}">{esc(item.suffix.strip())}</div>',
+                        unsafe_allow_html=True)
+    links = review_links(item)
+    if links:
+        st.markdown("**Links**")
+        st.markdown(links, unsafe_allow_html=True)
+    for note in item.notes:
+        st.caption(f"ℹ️ {note}")
+    if item.publish_blocked_reason:
+        st.caption(f"🚫 Publish now is unavailable: {item.publish_blocked_reason}")
+
+    actions = st.columns([1.5, 1, 1])
+    publish = actions[0].button(
+        "Approve & Publish Now" if item.status == "DRAFT" else "Publish Now", key="review_publish", icon="🚀",
+        disabled=not item.can_publish or over or not text.strip(), width="stretch",
+        help="Saves pending edits, approves a draft and posts it now through the platform's publisher.",
+    )
+    save = actions[1].button("Save Caption Edits", key="review_save", icon="💾", disabled=not dirty or not text.strip(),
+                             width="stretch")
+    with actions[2].popover("Delete / Discard", key="review_delete", icon="🗑️", width="stretch",
+                            disabled=item.status == "PENDING"):
+        st.write(f"Delete **{review_item_label(item)}**? Its image is removed too unless another post uses it. "
+                 "This cannot be undone.")
+        discard = st.button("Yes, delete it", key="review_delete_confirm", width="stretch")
+
+    if save:
+        try:
+            review.save_text(item.key, text)
+        except ReviewError as exc:
+            st.error(str(exc))
+            return
+        del st.session_state[text_key]
+        review_flash(f"Saved the {labels[item.text_field].lower()} of {review_item_label(item)}.")
+        st.rerun()
+    if publish:
+        try:
+            if dirty:
+                review.save_text(item.key, text)
+        except ReviewError as exc:
+            st.error(str(exc))
+            return
+        with st.spinner(f"Publishing to {item.platform_label}…"):
+            try:
+                result = review.publish(item.key)
+            except ReviewError as exc:
+                st.error(str(exc))
+                return
+        st.session_state.pop(text_key, None)
+        if result.success:
+            post = f" Post id {result.platform_post_id}." if result.platform_post_id else ""
+            review_flash(f"✓ {review_item_label(item)} — {result.message}.{post}")
+            next_key = neighbour(keys, item.key)
+            if next_key:
+                st.session_state[REVIEW_GOTO] = next_key
+        else:
+            review_flash(f"✗ {review_item_label(item)} was not published ({result.status}): {result.message}", "error")
+            st.session_state[REVIEW_GOTO] = item.key
+        st.rerun()
+    if discard:
+        try:
+            outcome = review.delete(item.key)
+        except ReviewError as exc:
+            st.error(str(exc))
+            return
+        st.session_state.pop(text_key, None)
+        image = " and its image" if outcome.get("media_removed") else ""
+        review_flash(f"Deleted {review_item_label(item)}{image}.")
+        next_key = neighbour(keys, item.key)
+        if next_key:
+            st.session_state[REVIEW_GOTO] = next_key
+        st.rerun()
 
 
 # --------------------------------------------------------------------------- #

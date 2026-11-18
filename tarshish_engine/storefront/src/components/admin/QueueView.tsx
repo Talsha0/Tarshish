@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronRight, Eraser, LoaderCircle, Radio, RefreshCw, RotateCcw, Send, Smartphone, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Eraser, LoaderCircle, Radio, RefreshCw, RotateCcw, Send, Trash2 } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
 
 import { CONTENT_TYPE_LABELS, PLATFORM_LABELS, adminApi, timeAgo } from "@/lib/admin/client";
@@ -8,7 +8,6 @@ import type { Category, Job, Publication, PubStatus } from "@/lib/admin/types";
 
 import { AssetInspector } from "./AssetInspector";
 import { useJobs } from "./jobs";
-import { PhonePreviewInspector } from "./simulator";
 import { ErrorNote, Loading, PageHeader, Panel, StatusBadge, useAction, useResource } from "./ui";
 
 type QueueResponse = { items: Publication[]; counts: Record<PubStatus, number> };
@@ -19,7 +18,7 @@ const STATUSES: { value: string; label: string }[] = [
   { value: "FAILED", label: "Failed" },
 ];
 
-function Row({ item, onChanged, onPreview }: { item: Publication; onChanged: () => void; onPreview: () => void }) {
+function Row({ item, onChanged }: { item: Publication; onChanged: () => void }) {
   const { start } = useJobs();
   const { busy, run } = useAction();
   const [open, setOpen] = useState(false);
@@ -37,13 +36,7 @@ function Row({ item, onChanged, onPreview }: { item: Publication; onChanged: () 
           <p className="mt-1 text-[11px] text-adm-faint">#{item.id}</p>
         </td>
         <td className="max-w-[22rem] py-2 pr-3">
-          {canPublish ? (
-            <button type="button" className="block max-w-full truncate text-left font-medium hover:text-adm-accent hover:underline" onClick={onPreview} title="Open in the phone preview">
-              {item.product_title}
-            </button>
-          ) : (
-            <p className="truncate font-medium">{item.product_title}</p>
-          )}
+          <p className="truncate font-medium">{item.product_title}</p>
           <p className="line-clamp-2 text-xs text-adm-soft">{item.caption}</p>
           {item.error_message && <p className="mt-1 line-clamp-2 text-xs text-adm-bad">{item.error_message}</p>}
         </td>
@@ -63,11 +56,6 @@ function Row({ item, onChanged, onPreview }: { item: Publication; onChanged: () 
         </td>
         <td className="py-2">
           <div className="flex flex-wrap justify-end gap-1">
-            {canPublish && (
-              <button type="button" className="adm-btn px-2 py-1 text-xs" onClick={onPreview} title="Phone preview" aria-label={`Preview #${item.id} on a phone`}>
-                <Smartphone className="h-3.5 w-3.5" />
-              </button>
-            )}
             {item.status === "FAILED" && (
               <button
                 type="button"
@@ -182,9 +170,6 @@ export function QueueView() {
   const [category, setCategory] = useState("");
   const [language, setLanguage] = useState("");
   const [platform, setPlatform] = useState("");
-  // Phone Preview Mode: null = closed, otherwise the item to open first ("" = the newest).
-  const [preview, setPreview] = useState<string | null>(null);
-  const [assetsRefresh, setAssetsRefresh] = useState(0);
   const categories = useResource<{ categories: Category[] }>("categories");
   const params = new URLSearchParams({ limit: "200" });
   if (status) params.set("status", status);
@@ -208,9 +193,6 @@ export function QueueView() {
         subtitle="Generated FindHub assets to review and publish, the pipeline's publication queue, and every background job."
         actions={
           <>
-            <button type="button" className="adm-btn-primary" onClick={() => setPreview("")} title="Review every unpublished post on a phone, one by one">
-              <Smartphone className="h-4 w-4" /> Phone Preview Mode
-            </button>
             <button type="button" className="adm-btn" onClick={() => void queue.reload()}>
               <RefreshCw className="h-4 w-4" /> Refresh
             </button>
@@ -246,7 +228,7 @@ export function QueueView() {
         }
       />
 
-      <AssetInspector onPreview={(id) => setPreview(`asset:${id}`)} refreshKey={assetsRefresh} />
+      <AssetInspector />
 
       <h2 className="mb-2 text-sm font-semibold">Pipeline publication queue</h2>
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -312,7 +294,7 @@ export function QueueView() {
               </thead>
               <tbody>
                 {queue.data.items.map((item) => (
-                  <Row key={item.id} item={item} onChanged={() => void queue.reload()} onPreview={() => setPreview(`pub:${item.id}`)} />
+                  <Row key={item.id} item={item} onChanged={() => void queue.reload()} />
                 ))}
               </tbody>
             </table>
@@ -321,17 +303,6 @@ export function QueueView() {
       </Panel>
 
       <JobHistory />
-
-      {preview !== null && (
-        <PhonePreviewInspector
-          initialKey={preview || null}
-          onClose={() => setPreview(null)}
-          onChanged={() => {
-            void queue.reload();
-            setAssetsRefresh((n) => n + 1);
-          }}
-        />
-      )}
     </>
   );
 }

@@ -314,7 +314,8 @@ def test_every_third_party_import_is_declared_in_requirements():
         "google_auth_httplib2": "google-auth-httplib2", "google_auth_oauthlib": "google-auth-oauthlib",
         "httplib2": "httplib2", "PIL": "Pillow",
     }
-    local = {"core", "plugins", "storage", "dashboard", "storefront_api", "api", "main", "tests", "conftest", "index"}
+    local = {"core", "plugins", "storage", "services", "dashboard", "storefront_api", "api", "main", "tests", "conftest",
+             "index"}
     imported: set[str] = set()
     for path in ROOT.rglob("*.py"):
         if {".venv", "node_modules", ".next"} & set(path.parts):  # node_modules ships Python build scripts

@@ -12,16 +12,11 @@ import type { Job } from "@/lib/admin/types";
 import { StatusBadge, useToast } from "./ui";
 
 type Tracked = Job & { lines: string[] };
-/**
- * `openConsole: false` keeps the console drawer closed and `quiet` skips the started/finished toasts
- * (callers that show their own progress and receipt). Errors starting the job are always toasted.
- */
-type StartOptions = { openConsole?: boolean; quiet?: boolean };
 
 type JobsApi = {
   jobs: Tracked[];
   /** POST an action that answers with a job, then follow it. Resolves with the finished job. */
-  start: (path: string, body?: unknown, label?: string, options?: StartOptions) => Promise<Job | null>;
+  start: (path: string, body?: unknown, label?: string) => Promise<Job | null>;
   /** Show an existing job (e.g. from the history list) in the drawer. */
   follow: (job: Job) => void;
   open: boolean;
@@ -47,7 +42,6 @@ export function JobsProvider({ children }: { children: ReactNode }) {
   const [finishedCount, setFinishedCount] = useState(0);
   const waiters = useRef(new Map<string, (job: Job) => void>());
   const inFlight = useRef(new Set<string>());
-  const quiet = useRef(new Set<string>());
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
 
@@ -69,16 +63,14 @@ export function JobsProvider({ children }: { children: ReactNode }) {
   );
 
   const start = useCallback(
-    async (path: string, body?: unknown, label?: string, options?: StartOptions) => {
+    async (path: string, body?: unknown, label?: string) => {
       try {
         const job = await adminApi<Job>(path, { method: "POST", body: body ?? {} });
         upsert(job, true);
-        if (options?.openConsole !== false) setOpen(true);
-        if (options?.quiet) quiet.current.add(job.id);
-        else toast("ok", `${label ?? job.kind} started`);
+        setOpen(true);
+        toast("ok", `${label ?? job.kind} started`);
         if (job.done) {
           // Finished before the first poll: the poller skips done jobs, so resolve here.
-          quiet.current.delete(job.id);
           setFinishedCount((n) => n + 1);
           return job;
         }
@@ -103,8 +95,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
             upsert(fresh);
             if (fresh.done) {
               setFinishedCount((n) => n + 1);
-              if (!quiet.current.delete(fresh.id))
-                toast(fresh.status === "SUCCEEDED" ? "ok" : "error", `${fresh.kind}: ${fresh.status.toLowerCase()}`);
+              toast(fresh.status === "SUCCEEDED" ? "ok" : "error", `${fresh.kind}: ${fresh.status.toLowerCase()}`);
               waiters.current.get(fresh.id)?.(fresh);
               waiters.current.delete(fresh.id);
             }
