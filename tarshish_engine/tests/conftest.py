@@ -24,6 +24,11 @@ from core import resilience  # noqa: E402
 from core.config import Settings  # noqa: E402
 from core.database import close_pools  # noqa: E402
 from plugins.sources import aliexpress_providers, temu_providers  # noqa: E402
+from dashboard import code_reload  # noqa: E402
+
+# The engine modules this test process imported are the current code: the dashboard (AppTest runs it in this
+# process) must not take them for a deploy's stale modules and drop them under the tests' feet.
+code_reload.mark_loaded(code_reload.fingerprint())
 
 _CREDENTIAL_VARS = (
     "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "TG_SPORTS_BOT_TOKEN", "TG_SPORTS_CHAT_ID",

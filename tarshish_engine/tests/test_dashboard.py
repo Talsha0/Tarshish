@@ -351,3 +351,33 @@ def test_a_production_database_needs_a_password(tmp_path, monkeypatch):
     app = AppTest.from_file(str(APP), default_timeout=120).run()
     assert any("DASHBOARD_PASSWORD" in error.value for error in app.error) and not app.tabs
     st.cache_resource.clear()
+
+
+
+@pytest.mark.parametrize("loaded_from", ["code before the deploy", None])  # None: loaded before the check existed
+def test_a_deploy_reloads_engine_modules_the_dashboard_has_in_memory(dashboard, loaded_from):
+    """Streamlit only reloads dashboard/; after a deploy pulls new code, old core/plugins modules are dropped."""
+    import sys
+    import types
+
+    from dashboard import code_reload
+
+    app, _ = dashboard
+    assert not app.exception
+    saved, core = dict(sys.modules), sys.modules["core"]
+    current = getattr(core, code_reload.MARKER)
+    try:
+        stale = types.ModuleType("plugins.generators.llm_text_gen")  # the old module: no key_fallback_notice
+        sys.modules["plugins.generators.llm_text_gen"] = stale
+        if loaded_from is None:
+            delattr(core, code_reload.MARKER)
+        else:
+            setattr(core, code_reload.MARKER, loaded_from)
+        app.run()
+        assert not app.exception
+        assert sys.modules["plugins.generators.llm_text_gen"] is not stale
+        assert any(tab.label == "Content Review" for tab in app.tabs)
+    finally:  # the other tests keep the module objects they imported
+        sys.modules.clear()
+        sys.modules.update(saved)
+        setattr(core, code_reload.MARKER, current)

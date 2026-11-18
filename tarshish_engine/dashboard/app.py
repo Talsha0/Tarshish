@@ -43,6 +43,14 @@ if str(ROOT) not in sys.path:  # `streamlit run` puts dashboard/ on sys.path, no
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st  # noqa: E402
+
+from dashboard import code_reload  # noqa: E402
+
+_code_fingerprint = code_reload.fingerprint()
+if code_reload.drop_stale_modules(_code_fingerprint):  # a deploy changed core/, plugins/ or services/
+    st.cache_resource.clear()  # the cached Engine was built from the old modules
+    st.cache_data.clear()
+
 from pydantic import ValidationError  # noqa: E402
 
 from core import Engine, bootstrap  # noqa: E402
@@ -63,6 +71,8 @@ from services.content_review import (  # noqa: E402
     ReviewItem,
     utf16_length,
 )
+
+code_reload.mark_loaded(_code_fingerprint)
 
 TAB_CATEGORIES = "Categories & Search"
 TAB_ACCOUNTS = "Social Accounts"
