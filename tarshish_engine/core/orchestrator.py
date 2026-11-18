@@ -50,6 +50,8 @@ logger = get_logger("orchestrator")
 
 #: Prefix of ``error_message`` on content stored without being sent (``store_unpublishable``).
 NOT_SENT = "Not sent — stored for review:"
+#: ``target_page`` of content stored for a (category, language, platform) that has no account yet.
+UNLINKED_PAGE = "(no account linked)"
 
 PublishingMode = Literal["immediate", "queued"]
 
@@ -140,8 +142,10 @@ class PublishingOrchestrator:
         self.scheduler = scheduler or JitterScheduler.from_settings(settings)
 
     # -- planning ---------------------------------------------------------------- #
-    def plan(self, category: str | None = None, language: str | None = None) -> list[tuple[str, str]]:
-        """``(category, language)`` pairs to run: the given ones, or every pair with an enabled account."""
+    def plan(self, category: str | None = None, language: str | None = None, *,
+             include_unlinked: bool = False) -> list[tuple[str, str]]:
+        """``(category, language)`` pairs to run: the given ones, or every pair with an enabled account
+        (``include_unlinked``: every configured language, accounts or not)."""
         if category and language:
             return [(category, language)]
         categories = [category] if category else [c.category_id for c in self.registry.list_categories(enabled_only=True)]
@@ -149,7 +153,7 @@ class PublishingOrchestrator:
         for category_id in categories:
             languages = [language] if language else sorted({
                 a.language for a in self.registry.list_social_accounts(category=category_id, enabled_only=True)
-            })
+            } | (set(self.registry.languages()) if include_unlinked else set()))
             pairs.extend((category_id, lang) for lang in languages)
         return pairs
 
@@ -176,9 +180,11 @@ class PublishingOrchestrator:
         platform has an enabled account for this category and language). ``dry_run``
         simulates everything without paid LLM calls, publishing or database writes.
         ``force`` re-processes products the account already received. ``store_unpublishable``
-        still generates and stores content for an account that cannot publish yet (e.g. its token
-        is not set): the rows are kept as ``FAILED`` with a :data:`NOT_SENT` note, never sent, so
-        they can be reviewed (Content Review) and published once the credentials exist. Raises
+        still generates (and, live, stores) content for a content type that cannot publish yet: its
+        account's token is not set, the account is disabled, or no account is linked at all (the row's
+        target is then :data:`UNLINKED_PAGE`). Stored rows are ``FAILED`` with a :data:`NOT_SENT` note
+        and never sent; they are reviewed in Content Review and published there once the account and
+        its credentials exist. Raises
         :class:`BudgetExceededError` (with ``.report`` attached) when the AI budget
         guardrail trips; any other problem is recorded on the report.
         """
@@ -223,14 +229,15 @@ class PublishingOrchestrator:
         if dry_run and self.budget.is_exceeded():
             report.warnings.append("The monthly AI budget is exhausted — a live run with a paid model would halt.")
 
-        for profile in self._profiles(report, content_types):
+        for profile in self._profiles(report, content_types, include_unlinked=store_unpublishable):
             self._run_content_type(report, category, profile, mode, limit or self.settings.publish_batch_limit,
                                    dry_run, force, store_unpublishable)
 
         if not dry_run:
             self._apply_retention(self.registry.storage())
 
-    def _profiles(self, report: RunReport, content_types: Sequence[str] | None) -> list[ContentProfile]:
+    def _profiles(self, report: RunReport, content_types: Sequence[str] | None, *,
+                  include_unlinked: bool = False) -> list[ContentProfile]:
         if content_types:
             profiles = [self.registry.get_content_profile(name) for name in dict.fromkeys(content_types)]
             for profile in profiles:
@@ -238,6 +245,8 @@ class PublishingOrchestrator:
                     report.warnings.append(f"Content type '{profile.content_type}' is disabled in its profile; "
                                            "running it because it was asked for explicitly.")
             return profiles
+        if include_unlinked:  # stored for review: accounts are not needed
+            return self.registry.list_content_profiles(enabled_only=True)
         # Default: every enabled content type that has an enabled account for this category + language.
         platforms = {
             account.platform for account in self.registry.list_social_accounts(
@@ -261,13 +270,19 @@ class PublishingOrchestrator:
         )
         report.routes.append(route)
         account = self.registry.get_social_account(category.category_id, report.language, profile.platform)
+        unusable = None
         if account is None or not account.enabled:
-            route.reason = (
+            unusable = (
                 f"no {'enabled ' if account else ''}{profile.platform} account for "
                 f"({category.category_id}, {report.language}, {profile.platform})"
             )
-            report.warnings.append(f"{profile.content_type} skipped: {route.reason}.")
-            return
+            if not store_unpublishable:
+                route.reason = unusable
+                report.warnings.append(f"{profile.content_type} skipped: {route.reason}.")
+                return
+            if account is None:  # a placeholder target: Content Review re-targets it once an account exists
+                account = SocialAccount(category_id=category.category_id, language=report.language,
+                                        platform=profile.platform, account_handle=UNLINKED_PAGE)
         page = self.registry.social_page(account, profile)
         route.account, route.publisher = account.account_handle, page.platform
 
@@ -276,14 +291,15 @@ class PublishingOrchestrator:
             options={"content_type": profile.content_type, "tone": profile.tone, "publish_format": profile.publish_format,
                      "category_name": category.display_name(report.language)},
         )
-        publisher, reason = self.registry.build_publisher(page, context)
+        publisher, reason = (None, unusable) if unusable else self.registry.build_publisher(page, context)
         route.ready, route.reason = publisher is not None, reason or ""
         unavailable = None
         if publisher is None:
             unavailable = reason or "the publisher could not be built"
-            if store_unpublishable and not dry_run:
-                report.warnings.append(f"{profile.content_type} → {page.label}: {unavailable}. Storing the content "
-                                       "for review without sending it.")
+            if store_unpublishable:
+                report.warnings.append(
+                    f"{profile.content_type} → {page.label}: {unavailable}. "
+                    + ("Previewing it anyway." if dry_run else "Storing the content for review without sending it."))
             else:
                 report.warnings.append(f"{profile.content_type} → {page.label}: {reason}.")
                 if not dry_run:

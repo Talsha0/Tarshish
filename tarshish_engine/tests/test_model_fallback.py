@@ -49,10 +49,10 @@ def test_a_missing_model_key_falls_back_to_the_free_chain_with_a_warning(claude_
     assert {row["caption"] for row in rows} == {"אוזניות במחיר מטורף 🎧"}
     assert {row["model_used"] for row in rows} == {"groq:llama-3.3-70b-versatile [free fallback for claude-sonnet-5-5]"}
     assert {row["generation_cost_usd"] for row in rows} == {0.0}
-    assert report.warnings == [
+    assert report.warnings == [(
         "console_post: ANTHROPIC_API_KEY is not set: claude-sonnet-5-5 was replaced by the free LLM "
         "groq:llama-3.3-70b-versatile. Add the key to write with claude-sonnet-5-5."
-    ]
+    )]
     usage = claude_route.db.query("SELECT generation_cost_usd, tokens_input FROM ai_usage")
     assert usage and all(row["generation_cost_usd"] == 0 and row["tokens_input"] == 120 for row in usage)
 
@@ -85,8 +85,8 @@ def test_a_dry_run_warns_ahead_and_calls_nothing(claude_route, free_reply, capsy
 
     assert free_reply == []  # dry-runs never call a model
     assert report.items[0].model_used.endswith("[ANTHROPIC_API_KEY not set: live runs use the free LLM chain]")
-    assert report.warnings == ["console_post: ANTHROPIC_API_KEY is not set: live runs replace claude-sonnet-5-5 "
-                               "with the free LLM chain (Gemini -> Groq -> OpenRouter free tiers)."]
+    assert report.warnings == [("console_post: ANTHROPIC_API_KEY is not set: live runs replace claude-sonnet-5-5 "
+                                "with the free LLM chain (Gemini -> Groq -> OpenRouter free tiers).")]
 
 
 def test_a_gemini_model_without_its_key_uses_the_other_free_providers(claude_route, free_reply):

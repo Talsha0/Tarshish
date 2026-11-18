@@ -640,13 +640,20 @@ def render_content_tab(engine: Engine) -> None:
 def run_pipeline(engine: Engine, category: str, language: str, content_types: list[str], dry_run: bool,
                  mode: str, limit: int, store_unpublishable: bool = False) -> None:
     buffer = io.StringIO()
+    last_id = (engine.db.query_one("SELECT MAX(id) AS n FROM publications") or {}).get("n") or 0
     try:
         with st.spinner("Running the publishing pipeline…"), contextlib.redirect_stdout(buffer):
             report = engine.orchestrator.run(
                 category, language, content_types or None, mode=mode, limit=limit, dry_run=dry_run,
-                store_unpublishable=store_unpublishable and not dry_run,
+                store_unpublishable=store_unpublishable,
             )
         st.session_state["run_result"] = {"report": report, "console": buffer.getvalue()}
+        fresh = engine.db.query_one(
+            "SELECT MAX(id) AS n, COUNT(*) AS c FROM publications WHERE id > ? AND status IN ('QUEUED', 'FAILED')",
+            (last_id,))
+        if not dry_run and fresh and fresh["c"]:  # show the new posts in Content Review right away
+            st.session_state[REVIEW_FOCUS] = {"category": category, "language": language, "key": f"pub:{fresh['n']}",
+                                              "count": int(fresh["c"])}
     except TarshishError as exc:  # BudgetExceededError included
         st.session_state["run_result"] = {"error": str(exc)}
 
@@ -721,10 +728,11 @@ def render_run_form(engine: Engine) -> None:
         cols[3].caption("With dry-run off the content is generated with the paid models and queued or "
                         "published to the real accounts.")
         store_unpublishable = st.toggle(
-            "Store for review without credentials", value=False, key="run_store_unpublishable",
-            help="For tests: with dry-run off, accounts that cannot publish yet (e.g. no Instagram token) still get "
-                 "their content generated and stored. It is never sent; it appears in Content Review as 'not sent', "
-                 "and Publish Now works there once the credentials are set.",
+            "Create even without an account or credentials", value=False, key="run_store_unpublishable",
+            help="For tests: content types with no linked account, a disabled account or a missing token still get "
+                 "their content generated (previewed on a dry-run, stored otherwise). Stored posts are never sent; "
+                 "they appear in Content Review as 'not sent', and Publish Now works there once the account and its "
+                 "credentials are set.",
         )
         submitted = st.form_submit_button("▶ Run pipeline", type="primary")
     if submitted:
@@ -1143,6 +1151,7 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
 REVIEW_PICK = "review_pick"            # selectbox: the item on the phone
 REVIEW_GOTO = "_review_goto"           # item to select on the next run (after a publish or delete)
 REVIEW_FLASH = "_review_flash"
+REVIEW_FOCUS = "_review_focus"          # set by a pipeline run: show its new posts
 REVIEW_SOURCES = {"all": "All sources", "asset": "Generated assets", "publication": "Pipeline queue"}
 STATUS_COLORS = {"DRAFT": "gray", "QUEUED": "blue", "PENDING": "orange", "FAILED": "red"}
 ANY = "Any"
@@ -1202,6 +1211,13 @@ def render_review_tab(engine: Engine) -> None:
         st.toast(message, icon="✅" if kind == "success" else "⚠️")
 
     everything = review.items(include_failed=True)
+    focus = st.session_state.pop(REVIEW_FOCUS, None)
+    if focus:  # a run just created posts: reset the filters to its category and language, open the newest
+        st.session_state.update({"review_source": "all", "review_category": focus["category"],
+                                 "review_language": focus["language"], "review_platform": ANY, "review_failed": True})
+        st.session_state[REVIEW_GOTO] = focus["key"]
+        st.info(f"{focus['count']} new post(s) for {focus['category']} / {focus['language']} from the last run are "
+                "shown below.", icon="📱")
     filters = st.columns([1.3, 1.2, 1, 1.2, 1.1])
     source = filters[0].selectbox("Source", list(REVIEW_SOURCES), format_func=REVIEW_SOURCES.get, key="review_source")
     categories = sorted({item.category_id for item in everything})
@@ -1262,8 +1278,9 @@ def render_review_panel(review: ContentReview, item: ReviewItem, keys: list[str]
     if "[free fallback for " in item.model:
         st.caption("⚠️ Written by a free LLM: the configured model's API key was not set when this was generated.")
     if item.not_sent_reason:
-        st.warning(f"Not sent — stored for review only: {item.not_sent_reason} Publish Now works once the "
-                   "account's credentials are set.", icon="📥")
+        then = (f"Link a {item.platform_label} account in Social Accounts, then Publish Now."
+                if item.target_account is None else "Publish Now works once the account's credentials are set.")
+        st.warning(f"Not sent — stored for review only: {item.not_sent_reason.rstrip('.')}. {then}", icon="📥")
     elif item.error_message:
         st.error(f"Last attempt failed: {item.error_message}")
 

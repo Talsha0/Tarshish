@@ -144,8 +144,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="simulate: no publishing, no paid LLM calls, no API quota, no database writes")
     run.add_argument("--force", action="store_true", help="with --publish: re-process products already handled")
     run.add_argument("--store-unpublishable", action="store_true",
-                     help="with --publish: still generate and store content for accounts that cannot publish yet "
-                          "(e.g. the token is not set), without sending it, for review and tests")
+                     help="with --publish: still generate and store content for content types that cannot publish "
+                          "yet (no linked account, or its token is not set), without sending it, for review and tests "
+                          "(with --dry-run: preview them too)")
     run.add_argument("--once", action="store_true", help="with --mode worker: publish what is due, then exit")
 
     manage = parser.add_argument_group("management")
@@ -214,8 +215,6 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--source only applies to --harvest")
     if (args.content_types or args.force or args.store_unpublishable) and not args.publish:
         parser.error("--content-types, --force and --store-unpublishable only apply to --publish")
-    if args.store_unpublishable and args.dry_run:
-        parser.error("--store-unpublishable stores content; it cannot be combined with --dry-run")
     verifying = args.verify_instagram or args.verify_youtube or args.verify_tiktok or args.verify_telegram
     if args.lang and not (args.publish or verifying or args.flush_queue or args.retry_failed or args.stats):
         parser.error("--lang applies to --publish (and narrows --verify-instagram/--verify-youtube/--verify-tiktok/"
@@ -485,7 +484,7 @@ def run_harvest(engine, args) -> int:
 def run_publish(engine, args) -> int:
     from core.resilience import BudgetExceededError
 
-    pairs = engine.orchestrator.plan(args.category, args.lang)
+    pairs = engine.orchestrator.plan(args.category, args.lang, include_unlinked=args.store_unpublishable)
     if not pairs:
         print("Nothing to publish: no enabled social account matches. Link one in the dashboard "
               "(Social Accounts tab) or config/social_accounts.yaml.", file=sys.stderr)

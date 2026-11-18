@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
-from core.orchestrator import NOT_SENT
+from core.orchestrator import NOT_SENT, UNLINKED_PAGE
 from core.resilience import TarshishError, redact
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ class ContentReview:
         self, *, sources: Iterable[Source] = ("asset", "publication"), include_failed: bool = True,
         category: str | None = None, language: str | None = None, platform: str | None = None, limit: int = 300,
     ) -> list[ReviewItem]:
-        """Unpublished posts, newest first per source (generated assets before pipeline publications)."""
+        """Unpublished posts (generated assets and pipeline publications), newest first."""
         sources = set(sources)
         result: list[ReviewItem] = []
         if "asset" in sources:
@@ -222,7 +222,7 @@ class ContentReview:
             rows = self.db.list_publications(statuses, limit=limit, category=category, language=language,
                                              account_platform=platform, include_content=True)
             result += [self.from_publication(row) for row in rows]
-        return result
+        return sorted(result, key=lambda item: (item.created_at, item.source == "publication", item.id), reverse=True)
 
     def item(self, key: str) -> ReviewItem:
         source, _, raw_id = key.partition(":")
@@ -293,6 +293,8 @@ class ContentReview:
         layout, variant = _FORMAT_LAYOUT.get(content_format) or _PLATFORM_LAYOUT.get(platform) or ("telegram", None)
         language = row.get("language") or content.get("language") or "en"
         editable = row["status"] in ("QUEUED", "FAILED")
+        unlinked = row.get("target_page") == UNLINKED_PAGE
+        blocked = self._unlinked_reason(row) if unlinked else None
         _, suffix = self.post_text(row, row.get("content_json"))
         caption = str(content.get("final_text") or row.get("caption") or "")
         if suffix is None:  # caption shortened to fit: show the caption and its hashtags
@@ -307,7 +309,8 @@ class ContentReview:
             platform=platform, content_type=content_format or str(row.get("content_type") or ""),
             type_label=CONTENT_TYPE_LABELS.get(content_format, content_format or str(row.get("content_type") or "")),
             status=row["status"], language=language, dir=text_direction(language),
-            handle=_handle(row.get("target_page")), target_account=row.get("target_page"),
+            handle=_handle(None if unlinked else row.get("target_page")),
+            target_account=None if unlinked else row.get("target_page"),
             category_id=row.get("category") or re.sub(r"_[a-z]{2}$", "", str(row.get("pipeline_id") or "")),
             text=caption, text_field="caption", suffix=suffix,
             image_path=None if is_video else local,
@@ -317,8 +320,8 @@ class ContentReview:
             price=product.get("price"), original_price=product.get("original_price"),
             currency=product.get("currency") or "USD",
             links=ReviewLinks(affiliate_url=_http(product.get("affiliate_url"))),
-            can_edit=editable, can_publish=editable,
-            publish_blocked_reason=None if editable else f"Status is {row['status']}.",
+            can_edit=editable, can_publish=editable and blocked is None,
+            publish_blocked_reason=blocked if editable else f"Status is {row['status']}.",
             model=row.get("model_used") or "", created_at=row.get("created_at") or "",
             error_message=row.get("error_message"),
         )
@@ -483,6 +486,10 @@ class ContentReview:
         row = self._publication(publication_id)
         if row["status"] not in ("QUEUED", "FAILED"):
             return PublishResult(key, False, row["status"], f"Publication #{publication_id} is {row['status']}.")
+        if row.get("target_page") == UNLINKED_PAGE:  # stored before an account existed: use the one linked now
+            blocked = self._retarget(row)
+            if blocked:
+                return PublishResult(key, False, row["status"], blocked)
         if not self.db.requeue_now(publication_id) or not self.db.claim_publication(publication_id):
             fresh = self.db.get_publication(publication_id)
             return PublishResult(key, False, fresh["status"] if fresh else "MISSING",
@@ -493,6 +500,32 @@ class ContentReview:
             return PublishResult(key, True, "PUBLISHED", f"Published to {fresh['target_page']} ({fresh['platform']})",
                                  receipt.platform_post_id)
         return PublishResult(key, False, "FAILED", redact(receipt.error_message or "the publisher reported a failure"))
+
+    def _linked_account(self, row: dict[str, Any]) -> Any:
+        account = self.engine.registry.get_social_account(row.get("category") or "", row.get("language") or "",
+                                                          row.get("account_platform") or "")
+        return account if account is not None and account.enabled else None
+
+    def _unlinked_reason(self, row: dict[str, Any]) -> str | None:
+        """Why a row stored without an account cannot be published yet (``None`` once one is linked)."""
+        if self._linked_account(row) is not None:
+            return None
+        return (f"No {row.get('account_platform')} account is linked for ({row.get('category')}, "
+                f"{row.get('language')}): link one in Social Accounts, then publish.")
+
+    def _retarget(self, row: dict[str, Any]) -> str | None:
+        """Point a row stored without an account at the account linked since; returns why not, if it cannot."""
+        account = self._linked_account(row)
+        if account is None:
+            return self._unlinked_reason(row)
+        try:
+            profile = self.engine.registry.get_content_profile(row.get("content_format") or "")
+        except TarshishError:  # the content type was removed since: publish in the account's default format
+            profile = None
+        page = self.engine.registry.social_page(account, profile)
+        self.db.retarget_publication(int(row["id"]), page.platform, page.page_name,
+                                     page.model_dump_json(exclude_none=True))
+        return None
 
     # -- deleting --------------------------------------------------------------- #
     def delete(self, key: str) -> dict[str, Any]:

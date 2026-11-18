@@ -1199,6 +1199,14 @@ class Database:
             (caption, content_json, publication_id),
         ) > 0
 
+    def retarget_publication(self, publication_id: int, platform: str, target_page: str, target_json: str) -> bool:
+        """Point a not-yet-sent row (QUEUED or FAILED) at another account, e.g. one linked after it was stored."""
+        return self._execute(
+            "UPDATE publications SET platform = ?, target_page = ?, target_json = ? "
+            "WHERE id = ? AND status IN ('QUEUED', 'FAILED')",
+            (platform, target_page, target_json, publication_id),
+        ) > 0
+
     def media_reference_count(self, *uris: str) -> int:
         """How many publications and generated assets still point at any of ``uris`` (orphan-media checks)."""
         uris = tuple(dict.fromkeys(u for u in uris if u))

@@ -395,3 +395,107 @@ def test_dashboard_run_form_stores_unsendable_instagram_posts_for_content_review
     assert any("Not sent — stored for review only" in warning.value and "SIM_IG_TOKEN" in warning.value
                for warning in app.warning)
     st.cache_resource.clear()
+
+
+# --------------------------------------------------------------------------- #
+# No account linked at all: created, previewed and stored anyway; published once an account exists
+# --------------------------------------------------------------------------- #
+def mock_instagram_profile(review: ContentReview) -> None:
+    from core.config import ContentProfile
+
+    review.engine.registry.save_content_profile(ContentProfile(
+        content_type="instagram_post", platform="instagram", generator="llm_text_gen", llm_model="mock",
+        publish_format="image"))
+
+
+def test_content_for_a_pair_without_an_account_is_previewed_stored_and_published_once_linked(review):
+    from core.orchestrator import UNLINKED_PAGE
+
+    review.engine.harvester.harvest("sports", "aliexpress_mock")  # sports/en has no Instagram account
+    mock_instagram_profile(review)
+    orchestrator = review.engine.orchestrator
+
+    skipped = orchestrator.run("sports", "en", ["instagram_post"], mode="queued", limit=1)
+    assert skipped.count("stored") == 0 and any("no instagram account" in w for w in skipped.warnings)
+
+    preview = orchestrator.run("sports", "en", ["instagram_post"], dry_run=True, limit=1, store_unpublishable=True)
+    assert preview.count("preview") == 1 and review.db.list_publications() == []
+    assert any("Previewing it anyway" in w for w in preview.warnings)
+
+    report = orchestrator.run("sports", "en", ["instagram_post"], mode="queued", limit=1, store_unpublishable=True)
+    assert report.ok and report.count("stored") == 1
+    row = review.db.list_publications()[0]
+    assert row["status"] == "FAILED" and row["target_page"] == UNLINKED_PAGE and "no instagram account" in row["error_message"]
+
+    item = review.item(f"pub:{row['id']}")
+    assert item.layout == "instagram_post" and item.dir == "ltr" and item.target_account is None
+    assert item.handle == "@findhub" and not item.can_publish and "Social Accounts" in item.publish_blocked_reason
+    refused = review.publish(item.key)
+    assert not refused.success and review.db.get_publication(row["id"])["status"] == "FAILED"
+
+    review.engine.registry.save_social_account(SocialAccount(
+        category_id="sports", language="en", platform="instagram", account_handle="@sports_en",
+        token_env_var="SIM_IG_TOKEN", account_id_env_var="SIM_IG_ACCOUNT",
+        platform_metadata={"app_id": "1", "business_account_id": "1784", "dry_run": "true"}))
+    assert review.item(item.key).can_publish
+    result = review.publish(item.key)
+    assert result.success, result.message
+    published = review.db.get_publication(row["id"])
+    assert published["status"] == "PUBLISHED" and published["target_page"] == "@sports_en"
+
+
+def test_without_content_types_the_option_covers_every_enabled_type_and_any_language(review):
+    review.engine.harvester.harvest("sports", "aliexpress_mock")
+    mock_instagram_profile(review)
+    assert ("sports", "en") in review.engine.orchestrator.plan("sports", include_unlinked=True)
+    assert ("sports", "en") not in review.engine.orchestrator.plan("sports")
+    report = review.engine.orchestrator.run("sports", "en", dry_run=True, limit=1, store_unpublishable=True)
+    assert {route.content_type for route in report.routes} >= {"instagram_post", "telegram_post"}
+
+
+def test_review_lists_the_newest_posts_first_across_assets_and_publications(review):
+    asset = add_asset(review, "instagram_post", "he")
+    review.db._execute("UPDATE generated_assets SET created_at = '2026-01-01T00:00:00+00:00' WHERE id = ?", (asset,))
+    publication = add_publication(review, "youtube_short", "youtube", "youtube_pub", "en")
+    assert [item.key for item in review.items()][:2] == [f"pub:{publication}", f"asset:{asset}"]
+
+
+def test_after_a_run_content_review_opens_the_new_posts_of_its_category(tmp_path, monkeypatch):
+    import streamlit as st
+
+    from core import bootstrap
+    from core.config import ContentProfile, load_settings
+
+    st.cache_resource.clear()
+    for name, value in {"DATABASE_PATH": tmp_path / "dashboard.db", "LOG_FILE": tmp_path / "logs" / "d.log",
+                        "LOCAL_MEDIA_DIR": tmp_path / "media", "GENERATED_MEDIA_DIR": tmp_path / "generated_media"}.items():
+        monkeypatch.setenv(name, str(value))
+    for name in ("DATABASE_URL", "DASHBOARD_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    engine = bootstrap(settings=load_settings(None), console_logging=False)
+    engine.harvester.harvest("gadgets", "temu_mock")
+    engine.harvester.harvest("sports", "aliexpress_mock")
+    review = ContentReview(engine)
+    for _ in range(3):  # older gadgets content already waiting
+        add_asset(review, "instagram_post", "he")
+    for content_type in ("instagram_post", "telegram_post"):
+        engine.registry.save_content_profile(ContentProfile(
+            content_type=content_type, platform=content_type.split("_")[0], generator="llm_text_gen", llm_model="mock"))
+
+    app = AppTest.from_file(str(APP), default_timeout=120).run()
+    app.selectbox(key="review_category").set_value("gadgets").run()  # an earlier filter must not hide the run
+    app.selectbox(key="run_category").set_value("sports")
+    app.selectbox(key="run_language").set_value("en")  # sports/en: no Instagram and no Telegram account
+    app.multiselect(key="run_types").set_value(["instagram_post", "telegram_post"])
+    app.toggle(key="run_dry").set_value(False)
+    app.toggle(key="run_store_unpublishable").set_value(True)
+    app.button(key="FormSubmitter:run_form-▶ Run pipeline").click().run()
+
+    assert not app.exception
+    rows = engine.db.list_publications()
+    assert {row["account_platform"] for row in rows} == {"instagram", "telegram"}
+    assert app.selectbox(key="review_category").value == "sports"
+    assert app.selectbox(key="review_pick").value == f"pub:{max(row['id'] for row in rows)}"
+    assert any("from the last run" in info.value for info in app.info)
+    assert any("no telegram account" in w.value or "no instagram account" in w.value for w in app.warning)
+    st.cache_resource.clear()
