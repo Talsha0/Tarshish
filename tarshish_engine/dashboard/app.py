@@ -14,8 +14,8 @@ Tabs
 2. Social Accounts       — the category × language × platform matrix: handles, .env variable names, on/off
 3. Content Types & AI    — generator + LLM model + tone per content type (instagram_post, instagram_story…)
 4. Run Pipelines & KPIs  — targeted publishing runs (Stage 2, dry-run by default), inventory, KPIs,
-                           budget, Content Review (every unpublished post on a phone: edit, publish
-                           now, discard), queue and logs
+                           budget, queue and logs
+5. Content Review        — every unpublished post on a phone: edit, publish now, discard
 
 The page talks to the same engine objects as the CLI (``core`` + ``MetricsService``),
 and configuration is read from SQLite on every rerun, so edits apply immediately.
@@ -68,10 +68,11 @@ TAB_CATEGORIES = "Categories & Search"
 TAB_ACCOUNTS = "Social Accounts"
 TAB_CONTENT = "Content Types & AI Models"
 TAB_RUN = "Run Pipelines & KPIs"
-TAB_KPIS, TAB_REVIEW, TAB_QUEUE = "KPIs & Budget", "Content Review", "Queue & Logs"   # inside Tab 4
+TAB_REVIEW = "Content Review"
+TAB_KPIS, TAB_QUEUE = "KPIs & Budget", "Queue & Logs"   # inside Tab 4
 _TAB_SLUGS = {"categories": TAB_CATEGORIES, "accounts": TAB_ACCOUNTS, "content": TAB_CONTENT, "run": TAB_RUN,
-              "kpis": TAB_RUN, "review": TAB_RUN, "queue": TAB_RUN}
-_INNER_TAB_SLUGS = {"kpis": TAB_KPIS, "review": TAB_REVIEW, "queue": TAB_QUEUE}
+              "kpis": TAB_RUN, "queue": TAB_RUN, "review": TAB_REVIEW}
+_INNER_TAB_SLUGS = {"kpis": TAB_KPIS, "queue": TAB_QUEUE}
 NEW_CATEGORY = "➕ Add a new category"
 SELECT_CATEGORY = "_select_category"  # category to show in the form on the next draw
 NO_FORMAT = "(publisher decides)"
@@ -652,8 +653,9 @@ def run_pipeline(engine: Engine, category: str, language: str, content_types: li
             "SELECT MAX(id) AS n, COUNT(*) AS c FROM publications WHERE id > ? AND status IN ('QUEUED', 'FAILED')",
             (last_id,))
         if not dry_run and fresh and fresh["c"]:  # show the new posts in Content Review right away
-            st.session_state[REVIEW_FOCUS] = {"category": category, "language": language, "key": f"pub:{fresh['n']}",
-                                              "count": int(fresh["c"])}
+            focus = {"category": category, "language": language, "key": f"pub:{fresh['n']}", "count": int(fresh["c"])}
+            st.session_state[REVIEW_FOCUS] = focus
+            st.session_state["run_result"]["review_focus"] = focus
     except TarshishError as exc:  # BudgetExceededError included
         st.session_state["run_result"] = {"error": str(exc)}
 
@@ -678,6 +680,9 @@ def render_run_result() -> None:
              "candidates": "Products", "status": "Status"},
             numeric=("candidates",), clipped=("status",),
         )
+        focus = result.get("review_focus")
+        if focus:
+            st.info(f"{focus['count']} new post(s) are waiting in the **{TAB_REVIEW}** tab.", icon="📱")
         st.caption(f"Published {report.count('published')} · queued {report.count('queued')} · stored unsent "
                    f"{report.count('stored')} · previewed "
                    f"{report.count('preview')} · failed {report.count('failed')} · AI cost {money(report.cost_usd, 4)}")
@@ -751,11 +756,9 @@ def render_run_tab(engine: Engine, metrics: MetricsService) -> None:
                formats={"last_harvest": lambda value: local_time(engine, value)}, numeric=("products",))
     st.divider()
     inner = _INNER_TAB_SLUGS.get(str(st.query_params.get("tab", "")).lower(), TAB_KPIS)
-    kpis, review, queue = st.tabs([TAB_KPIS, TAB_REVIEW, TAB_QUEUE], default=inner)
+    kpis, queue = st.tabs([TAB_KPIS, TAB_QUEUE], default=inner)
     with kpis:
         render_kpis_tab(engine, metrics)
-    with review:
-        render_review_tab(engine)
     with queue:
         render_queue_tab(engine)
 
@@ -1146,7 +1149,7 @@ def render_kpis_tab(engine: Engine, metrics: MetricsService) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Content Review — every unpublished post on a phone: edit, publish now, discard
+# Content Review (Tab 5) — every unpublished post on a phone: edit, publish now, discard
 # --------------------------------------------------------------------------- #
 REVIEW_PICK = "review_pick"            # selectbox: the item on the phone
 REVIEW_GOTO = "_review_goto"           # item to select on the next run (after a publish or delete)
@@ -1528,9 +1531,9 @@ def main() -> None:
     st.caption("Two-stage affiliate engine — harvest products per category, publish per category × language")
     show_flash()
 
-    labels = [TAB_CATEGORIES, TAB_ACCOUNTS, TAB_CONTENT, TAB_RUN]
+    labels = [TAB_CATEGORIES, TAB_ACCOUNTS, TAB_CONTENT, TAB_RUN, TAB_REVIEW]
     default = _TAB_SLUGS.get(str(st.query_params.get("tab", "")).lower(), TAB_CATEGORIES)  # deep link: ?tab=run
-    tab_categories, tab_accounts, tab_content, tab_run = st.tabs(labels, default=default)
+    tab_categories, tab_accounts, tab_content, tab_run, tab_review = st.tabs(labels, default=default)
     with tab_categories:
         render_categories_tab(engine)
     with tab_accounts:
@@ -1539,6 +1542,8 @@ def main() -> None:
         render_content_tab(engine)
     with tab_run:
         render_run_tab(engine, metrics)
+    with tab_review:
+        render_review_tab(engine)
 
 
 main()

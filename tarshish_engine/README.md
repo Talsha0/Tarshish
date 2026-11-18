@@ -118,7 +118,7 @@ Then open <http://localhost:3000> (it redirects to the Hebrew storefront, `/he`)
 | `python main.py --publish --category gadgets --lang en --dry-run` | Simulate every enabled content type that has an English account: no posts, no paid LLM calls, no DB writes. |
 | `python main.py --publish --category gadgets --lang he --mode immediate` | Publish now instead of queueing. |
 | `python main.py --publish --category gadgets` | Every language that has an enabled account for the category (omit `--category` too for everything). |
-| `python main.py --publish --category sports --lang he --content-types instagram_post,telegram_post --store-unpublishable` | For tests: also generate content for content types that cannot publish yet — no linked account, a disabled account or a missing token (e.g. no Instagram key). With `--dry-run` they are previewed; otherwise they are stored, never sent, as `FAILED` with a "Not sent — stored for review" note, and show in the dashboard's Content Review (which opens a run's new posts right away). *Publish Now* sends them once the account is linked and its credentials are set. Dashboard: the **Create even without an account or credentials** switch in the run form. |
+| `python main.py --publish --category sports --lang he --content-types instagram_post,telegram_post --store-unpublishable` | For tests: also generate content for content types that cannot publish yet — no linked account, a disabled account or a missing token (e.g. no Instagram key). With `--dry-run` they are previewed; otherwise they are stored, never sent, as `FAILED` with a "Not sent — stored for review" note, and show in the dashboard's Content Review tab (which opens a run's new posts right away). *Publish Now* sends them once the account is linked and its credentials are set. Dashboard: the **Create even without an account or credentials** switch in the run form. |
 | `python main.py --mode worker` | Publish the queue with human-like delays inside active hours (`--once` for a single pass). |
 
 **Management**
@@ -159,9 +159,9 @@ python -m streamlit run dashboard/app.py     # same thing; prefer this form on W
 4. **Run Pipelines & KPIs** — run a targeted pipeline (category, language, content types, dry-run on by
    default, mode, products per type) and read its routing table and the generated captions; the harvested
    inventory; then **KPIs & Budget** (views, clicks, revenue, net profit, monthly AI spend vs.
-   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform, content type and pipeline, storefront click-throughs),
-   **Content Review** (below) and **Queue & Logs** (queued / published / failed, retry, flush, worker pass,
-   redacted log tail).
+   `MAX_MONTHLY_AI_BUDGET_USD`, breakdowns by platform, content type and pipeline, storefront click-throughs)
+   and **Queue & Logs** (queued / published / failed, retry, flush, worker pass, redacted log tail).
+5. **Content Review** — its own tab, described below.
 
 **Content Review** is the Mobile Device Preview Simulator: every unpublished post (FindHub assets in
 `DRAFT` / `QUEUED` / `FAILED` and the pipeline's queue) on a 375×812 smartphone, in the skin of the platform

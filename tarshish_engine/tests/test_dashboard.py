@@ -50,8 +50,10 @@ def test_dashboard_renders_every_tab_harvests_and_runs_a_dry_run(dashboard):
     app, db = dashboard
 
     assert not app.exception
-    assert [tab.label for tab in app.tabs][:4] == [
-        "Categories & Search", "Social Accounts", "Content Types & AI Models", "Run Pipelines & KPIs"]
+    top_level = ["Categories & Search", "Social Accounts", "Content Types & AI Models", "Run Pipelines & KPIs",
+                 "Content Review"]
+    labels = [tab.label for tab in app.tabs]
+    assert labels[:4] == top_level[:4] and [label for label in labels if label in top_level] == top_level
     assert any(metric.label == "Net profit (USD)" for metric in app.metric)
     assert any("Monthly AI spend" in header.value for header in app.subheader)
     assert {metric.label: metric.value for metric in app.metric}["Storefront clicks"] == "0"
