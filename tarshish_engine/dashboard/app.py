@@ -622,12 +622,13 @@ def render_content_tab(engine: Engine) -> None:
 # Tab 4 — run pipelines & live KPIs
 # --------------------------------------------------------------------------- #
 def run_pipeline(engine: Engine, category: str, language: str, content_types: list[str], dry_run: bool,
-                 mode: str, limit: int) -> None:
+                 mode: str, limit: int, store_unpublishable: bool = False) -> None:
     buffer = io.StringIO()
     try:
         with st.spinner("Running the publishing pipeline…"), contextlib.redirect_stdout(buffer):
             report = engine.orchestrator.run(
                 category, language, content_types or None, mode=mode, limit=limit, dry_run=dry_run,
+                store_unpublishable=store_unpublishable and not dry_run,
             )
         st.session_state["run_result"] = {"report": report, "console": buffer.getvalue()}
     except TarshishError as exc:  # BudgetExceededError included
@@ -654,7 +655,8 @@ def render_run_result() -> None:
              "candidates": "Products", "status": "Status"},
             numeric=("candidates",), clipped=("status",),
         )
-        st.caption(f"Published {report.count('published')} · queued {report.count('queued')} · previewed "
+        st.caption(f"Published {report.count('published')} · queued {report.count('queued')} · stored unsent "
+                   f"{report.count('stored')} · previewed "
                    f"{report.count('preview')} · failed {report.count('failed')} · AI cost {money(report.cost_usd, 4)}")
         for warning in report.warnings:
             st.warning(warning, icon="⚠️")
@@ -702,9 +704,15 @@ def render_run_form(engine: Engine) -> None:
         limit = cols[2].number_input("Products per type", min_value=1, max_value=50, value=3, key="run_limit")
         cols[3].caption("With dry-run off the content is generated with the paid models and queued or "
                         "published to the real accounts.")
+        store_unpublishable = st.toggle(
+            "Store for review without credentials", value=False, key="run_store_unpublishable",
+            help="For tests: with dry-run off, accounts that cannot publish yet (e.g. no Instagram token) still get "
+                 "their content generated and stored. It is never sent; it appears in Content Review as 'not sent', "
+                 "and Publish Now works there once the credentials are set.",
+        )
         submitted = st.form_submit_button("▶ Run pipeline", type="primary")
     if submitted:
-        run_pipeline(engine, category, language, content_types, dry_run, mode, int(limit))
+        run_pipeline(engine, category, language, content_types, dry_run, mode, int(limit), store_unpublishable)
     render_run_result()
 
 
@@ -1235,7 +1243,10 @@ def render_review_panel(review: ContentReview, item: ReviewItem, keys: list[str]
     }
     st.markdown('<dl class="tsh-meta">' + "".join(f"<dt>{esc(k)}</dt><dd>{esc(v)}</dd>" for k, v in meta.items())
                 + "</dl>", unsafe_allow_html=True)
-    if item.error_message:
+    if item.not_sent_reason:
+        st.warning(f"Not sent — stored for review only: {item.not_sent_reason} Publish Now works once the "
+                   "account's credentials are set.", icon="📥")
+    elif item.error_message:
         st.error(f"Last attempt failed: {item.error_message}")
 
     labels = {"generated_text": "Post text", "reel_caption": "Reel caption", "caption": "Caption"}

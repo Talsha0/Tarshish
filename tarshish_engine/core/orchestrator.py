@@ -48,6 +48,9 @@ from core.worker import JitterScheduler, deliver_publication
 
 logger = get_logger("orchestrator")
 
+#: Prefix of ``error_message`` on content stored without being sent (``store_unpublishable``).
+NOT_SENT = "Not sent — stored for review:"
+
 PublishingMode = Literal["immediate", "queued"]
 
 
@@ -63,7 +66,7 @@ class ItemOutcome:
     content_type: str
     external_id: str
     title: str
-    status: str  # published | queued | preview | failed
+    status: str  # published | queued | stored | preview | failed
     target: str = ""            # "instagram_pub → @gadgets.il"
     detail: str = ""
     configured_model: str = ""  # the model the content profile routes to
@@ -165,13 +168,17 @@ class PublishingOrchestrator:
         limit: int | None = None,
         dry_run: bool = False,
         force: bool = False,
+        store_unpublishable: bool = False,
     ) -> RunReport:
         """Generate and publish content for one ``(category, language)``.
 
         ``content_types`` restricts the run (default: every enabled content profile whose
         platform has an enabled account for this category and language). ``dry_run``
         simulates everything without paid LLM calls, publishing or database writes.
-        ``force`` re-processes products the account already received. Raises
+        ``force`` re-processes products the account already received. ``store_unpublishable``
+        still generates and stores content for an account that cannot publish yet (e.g. its token
+        is not set): the rows are kept as ``FAILED`` with a :data:`NOT_SENT` note, never sent, so
+        they can be reviewed (Content Review) and published once the credentials exist. Raises
         :class:`BudgetExceededError` (with ``.report`` attached) when the AI budget
         guardrail trips; any other problem is recorded on the report.
         """
@@ -182,7 +189,7 @@ class PublishingOrchestrator:
             ",".join(content_types) if content_types else "all", effective_mode, ", dry-run" if dry_run else "",
         )
         try:
-            self._execute(report, content_types, effective_mode, limit, dry_run, force)
+            self._execute(report, content_types, effective_mode, limit, dry_run, force, store_unpublishable)
         except BudgetExceededError as exc:
             report.halted_by_budget = True
             report.error = str(exc)
@@ -206,7 +213,7 @@ class PublishingOrchestrator:
     # -- stages ------------------------------------------------------------------------ #
     def _execute(
         self, report: RunReport, content_types: Sequence[str] | None, mode: str, limit: int | None,
-        dry_run: bool, force: bool,
+        dry_run: bool, force: bool, store_unpublishable: bool = False,
     ) -> None:
         if mode not in ("immediate", "queued"):
             raise PipelineError(f"Unsupported publishing mode '{mode}' (use 'immediate' or 'queued').")
@@ -218,7 +225,7 @@ class PublishingOrchestrator:
 
         for profile in self._profiles(report, content_types):
             self._run_content_type(report, category, profile, mode, limit or self.settings.publish_batch_limit,
-                                   dry_run, force)
+                                   dry_run, force, store_unpublishable)
 
         if not dry_run:
             self._apply_retention(self.registry.storage())
@@ -246,7 +253,7 @@ class PublishingOrchestrator:
 
     def _run_content_type(
         self, report: RunReport, category: CategoryConfig, profile: ContentProfile, mode: str, limit: int,
-        dry_run: bool, force: bool,
+        dry_run: bool, force: bool, store_unpublishable: bool = False,
     ) -> None:
         route = ContentTypeRoute(
             content_type=profile.content_type, platform=profile.platform, generator=profile.generator,
@@ -271,10 +278,16 @@ class PublishingOrchestrator:
         )
         publisher, reason = self.registry.build_publisher(page, context)
         route.ready, route.reason = publisher is not None, reason or ""
+        unavailable = None
         if publisher is None:
-            report.warnings.append(f"{profile.content_type} → {page.label}: {reason}.")
-            if not dry_run:
-                return  # nothing could be delivered: do not spend AI budget on it
+            unavailable = reason or "the publisher could not be built"
+            if store_unpublishable and not dry_run:
+                report.warnings.append(f"{profile.content_type} → {page.label}: {unavailable}. Storing the content "
+                                       "for review without sending it.")
+            else:
+                report.warnings.append(f"{profile.content_type} → {page.label}: {reason}.")
+                if not dry_run:
+                    return  # nothing could be delivered: do not spend AI budget on it
         generator: BaseGenerator = self.registry.plugins.get("generator", profile.generator)(context)
 
         products = self.db.unpublished_products(
@@ -292,7 +305,8 @@ class PublishingOrchestrator:
 
         for product in products:
             try:
-                outcome = self._process(report, account, profile, page, generator, publisher, product, mode, dry_run)
+                outcome = self._process(report, account, profile, page, generator, publisher, product, mode, dry_run,
+                                        unavailable)
             except BudgetExceededError:
                 raise  # guardrail: stop the whole run, never swallow
             except Exception as exc:
@@ -311,6 +325,7 @@ class PublishingOrchestrator:
     def _process(
         self, report: RunReport, account: SocialAccount, profile: ContentProfile, page: SocialPage,
         generator: BaseGenerator, publisher: BasePublisher | None, product: Product, mode: str, dry_run: bool,
+        unavailable: str | None = None,
     ) -> ItemOutcome:
         content = generator.generate(product, report.language, profile.prompt_template)
         content.content_format = profile.content_type
@@ -335,8 +350,11 @@ class PublishingOrchestrator:
         product_id = self.db.product_id(product.source, product.external_id)
         if product_id is None:  # harvested rows are the only input, but a concurrent delete is possible
             product_id = self.db.upsert_product(product)
-        assert publisher is not None  # live runs return early without one
-        status, detail = self._dispatch(report, account, page, publisher, product_id, content, mode)
+        if publisher is None:  # store_unpublishable: keep it for review, never send it
+            status, detail = self._store_unsent(report, account, page, product_id, content,
+                                                unavailable or "the publisher could not be built")
+        else:
+            status, detail = self._dispatch(report, account, page, publisher, product_id, content, mode)
         outcome.status, outcome.detail = status, detail
         return outcome
 
@@ -365,6 +383,24 @@ class PublishingOrchestrator:
         except Exception as exc:
             logger.exception("Pipeline '%s': target %s failed.", report.pipeline_id, page.label)
             return "failed", redact(f"{type(exc).__name__}: {exc}")
+
+    def _store_unsent(
+        self, report: RunReport, account: SocialAccount, page: SocialPage, product_id: int,
+        content: GeneratedContent, reason: str,
+    ) -> tuple[str, str]:
+        """Keep content for an account that cannot publish yet: ``FAILED`` + a :data:`NOT_SENT` note.
+
+        ``FAILED`` rows are never picked up by the worker, show up in Content Review, and are published
+        there (or re-queued with ``--retry-failed``) once the credentials exist.
+        """
+        publication_id = self.db.insert_publication(
+            pipeline_id=report.pipeline_id, product_id=product_id, category=report.category, language=report.language,
+            account_platform=account.platform, platform=page.platform, target_page=page.page_name,
+            target_json=page.model_dump_json(exclude_none=True), content=content, status=PublicationStatus.FAILED,
+            cost_share_usd=content.generation_cost_usd,
+        )
+        self.db.mark_failed(publication_id, redact(f"{NOT_SENT} {reason}"))
+        return "stored", f"not sent ({reason}); stored for review as #{publication_id}"
 
     # -- dry-run --------------------------------------------------------------------------- #
     def _preview(self, report: RunReport, profile: ContentProfile, page: SocialPage, content: GeneratedContent) -> None:

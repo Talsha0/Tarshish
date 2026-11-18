@@ -296,3 +296,102 @@ def test_content_review_tab_edits_publishes_and_deletes(tmp_path, monkeypatch):
     assert image.exists()  # the published post still references this file
     assert any("Nothing is waiting for review" in info.value for info in app.info)
     st.cache_resource.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Content for an account that cannot publish yet (no Instagram token): stored for review, never sent
+# --------------------------------------------------------------------------- #
+def instagram_without_token(review: ContentReview, monkeypatch) -> None:
+    from core.config import ContentProfile
+
+    monkeypatch.delenv("SIM_IG_TOKEN", raising=False)  # the Instagram key was never provided
+    review.engine.registry.save_content_profile(ContentProfile(
+        content_type="instagram_post", platform="instagram", generator="llm_text_gen", llm_model="mock",
+        publish_format="image",
+    ))
+
+
+def test_without_the_option_a_live_run_skips_an_account_without_credentials(review, monkeypatch):
+    instagram_without_token(review, monkeypatch)
+
+    report = review.engine.orchestrator.run("gadgets", "he", ["instagram_post"], mode="queued", limit=2)
+
+    assert report.count("stored", "queued") == 0 and review.db.list_publications() == []
+    assert any("SIM_IG_TOKEN" in warning for warning in report.warnings)
+
+
+def test_content_for_an_account_without_credentials_is_stored_for_review_and_never_sent(review, monkeypatch):
+    from core.orchestrator import NOT_SENT
+
+    instagram_without_token(review, monkeypatch)
+
+    report = review.engine.orchestrator.run("gadgets", "he", ["instagram_post"], mode="queued", limit=2,
+                                            store_unpublishable=True)
+
+    assert report.ok and report.count("stored") == 2 and report.count("queued", "published") == 0
+    rows = review.db.list_publications()
+    assert len(rows) == 2 and {row["status"] for row in rows} == {"FAILED"}
+    assert all(row["error_message"].startswith(NOT_SENT) and "SIM_IG_TOKEN" in row["error_message"] for row in rows)
+    review.engine.create_worker().run_once()  # the worker never touches them
+    assert {row["status"] for row in review.db.list_publications()} == {"FAILED"}
+
+    items = [item for item in review.items() if item.source == "publication"]
+    assert len(items) == 2
+    item = items[0]
+    assert item.layout == "instagram_post" and item.dir == "rtl" and item.can_edit and item.can_publish
+    assert "SIM_IG_TOKEN" in item.not_sent_reason
+    assert 'data-layout="instagram_post"' in render_phone(item)
+    review.save_text(item.key, "קפשן לבדיקה")
+    assert review.db.get_publication(item.id)["caption"] == "קפשן לבדיקה"
+
+    # Once the key exists, Publish Now sends it (the account is a dry-run account here).
+    monkeypatch.setenv("SIM_IG_TOKEN", "dummy-token-value")
+    result = review.publish(item.key)
+    assert result.success and result.platform_post_id.startswith("dry-run"), result.message
+    assert review.db.get_publication(item.id)["status"] == "PUBLISHED"
+
+
+def test_a_dry_run_ignores_the_option_and_writes_nothing(review, monkeypatch):
+    instagram_without_token(review, monkeypatch)
+    review.engine.orchestrator.run("gadgets", "he", ["instagram_post"], dry_run=True, store_unpublishable=True)
+    assert review.db.list_publications() == []
+
+
+def test_dashboard_run_form_stores_unsendable_instagram_posts_for_content_review(tmp_path, monkeypatch):
+    import streamlit as st
+
+    from core import bootstrap
+    from core.config import ContentProfile, load_settings
+
+    st.cache_resource.clear()
+    for name, value in {"DATABASE_PATH": tmp_path / "dashboard.db", "LOG_FILE": tmp_path / "logs" / "d.log",
+                        "LOCAL_MEDIA_DIR": tmp_path / "media", "GENERATED_MEDIA_DIR": tmp_path / "generated_media",
+                        "WORKER_ACTIVE_HOURS_START": 0, "WORKER_ACTIVE_HOURS_END": 24}.items():
+        monkeypatch.setenv(name, str(value))
+    for name in ("DATABASE_URL", "DASHBOARD_PASSWORD", "SIM_IG_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    engine = bootstrap(settings=load_settings(None), console_logging=False)
+    engine.harvester.harvest("gadgets", "temu_mock")
+    engine.registry.save_content_profile(ContentProfile(
+        content_type="instagram_post", platform="instagram", generator="llm_text_gen", llm_model="mock"))
+    engine.registry.save_social_account(SocialAccount(
+        category_id="gadgets", language="he", platform="instagram", account_handle="@findhub_gadgets_he",
+        token_env_var="SIM_IG_TOKEN", account_id_env_var="SIM_IG_ACCOUNT",
+        platform_metadata={"app_id": "1", "business_account_id": "1784"}))
+
+    app = AppTest.from_file(str(APP), default_timeout=120).run()
+    app.selectbox(key="run_category").set_value("gadgets")
+    app.selectbox(key="run_language").set_value("he")
+    app.multiselect(key="run_types").set_value(["instagram_post"])
+    app.toggle(key="run_dry").set_value(False)
+    app.toggle(key="run_store_unpublishable").set_value(True)
+    app.button(key="FormSubmitter:run_form-▶ Run pipeline").click().run()
+
+    assert not app.exception
+    assert any("stored unsent" in caption.value for caption in app.caption)
+    rows = engine.db.list_publications()
+    assert rows and {row["status"] for row in rows} == {"FAILED"}
+    assert app.selectbox(key="review_pick").value.startswith("pub:")
+    assert any("Not sent — stored for review only" in warning.value and "SIM_IG_TOKEN" in warning.value
+               for warning in app.warning)
+    st.cache_resource.clear()

@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from core.orchestrator import NOT_SENT
 from core.resilience import TarshishError, redact
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,13 @@ class ReviewItem:
     model: str
     created_at: str
     error_message: str | None = None
+
+    @property
+    def not_sent_reason(self) -> str | None:
+        """Why content stored with ``store_unpublishable`` was never sent (e.g. a missing token), else ``None``."""
+        if self.status == "FAILED" and (self.error_message or "").startswith(NOT_SENT):
+            return self.error_message.removeprefix(NOT_SENT).strip() or None  # type: ignore[union-attr]
+        return None
 
     def post_text(self, text: str | None = None) -> str:
         """The post as it will read: the (edited) caption plus what the publisher appends."""

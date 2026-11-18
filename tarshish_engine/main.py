@@ -37,7 +37,7 @@ import sys
 EXIT_OK, EXIT_FAILURES, EXIT_CONFIG, EXIT_BUDGET = 0, 1, 2, 3
 _RULE = "─" * 78
 _MARKS = {
-    "published": "✓", "queued": "⏱", "preview": "•", "skipped": "-", "failed": "✗", "inserted": "✓",
+    "published": "✓", "queued": "⏱", "stored": "◦", "preview": "•", "skipped": "-", "failed": "✗", "inserted": "✓",
 }
 
 
@@ -143,6 +143,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true",
                      help="simulate: no publishing, no paid LLM calls, no API quota, no database writes")
     run.add_argument("--force", action="store_true", help="with --publish: re-process products already handled")
+    run.add_argument("--store-unpublishable", action="store_true",
+                     help="with --publish: still generate and store content for accounts that cannot publish yet "
+                          "(e.g. the token is not set), without sending it, for review and tests")
     run.add_argument("--once", action="store_true", help="with --mode worker: publish what is due, then exit")
 
     manage = parser.add_argument_group("management")
@@ -209,8 +212,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error(f"--mode {args.mode} only applies to --publish")
     if args.source and not args.harvest:
         parser.error("--source only applies to --harvest")
-    if (args.content_types or args.force) and not args.publish:
-        parser.error("--content-types and --force only apply to --publish")
+    if (args.content_types or args.force or args.store_unpublishable) and not args.publish:
+        parser.error("--content-types, --force and --store-unpublishable only apply to --publish")
+    if args.store_unpublishable and args.dry_run:
+        parser.error("--store-unpublishable stores content; it cannot be combined with --dry-run")
     verifying = args.verify_instagram or args.verify_youtube or args.verify_tiktok or args.verify_telegram
     if args.lang and not (args.publish or verifying or args.flush_queue or args.retry_failed or args.stats):
         parser.error("--lang applies to --publish (and narrows --verify-instagram/--verify-youtube/--verify-tiktok/"
@@ -274,7 +279,8 @@ def print_report(report) -> None:
         state = "ready" if route.ready else (route.reason or "not ready")
         print(f"   ▸ {route.content_type:<16} {route.generator} [{route.llm_model}] ➔ {account}"
               f" · {route.candidates} product(s) · {_clip(state, 60)}")
-    print(f" published {report.count('published')} · queued {report.count('queued')} · previewed "
+    print(f" published {report.count('published')} · queued {report.count('queued')} · stored unsent "
+          f"{report.count('stored')} · previewed "
           f"{report.count('preview')} · failed {report.count('failed')} · AI cost ${report.cost_usd:.4f}")
     for item in report.items:
         print(f"   {_MARKS.get(item.status, '?')} {item.status:<9} {item.content_type:<16} {_clip(item.title, 44)}")
@@ -489,7 +495,7 @@ def run_publish(engine, args) -> int:
         try:
             report = engine.orchestrator.run(
                 category, language, args.content_types, mode=args.mode, limit=args.limit, dry_run=args.dry_run,
-                force=args.force,
+                force=args.force, store_unpublishable=args.store_unpublishable,
             )
         except BudgetExceededError as exc:
             partial = getattr(exc, "report", None)
