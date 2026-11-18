@@ -177,6 +177,17 @@ class Settings(BaseSettings):
     def _normalise_storage_mode(cls, value: str) -> str:
         return value.strip().lower()
 
+    @field_validator("anthropic_api_key", "gemini_api_key", "groq_api_key", "openrouter_api_key", mode="before")
+    @classmethod
+    def _clean_llm_keys(cls, value: Any) -> Any:
+        """A key pasted with spaces, a newline or wrapping quotes (``"sk-ant-…"`` in a secrets box) is rejected
+        by the provider as an invalid token: keep only the key itself."""
+        if isinstance(value, str):
+            value = value.strip()
+            while len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1].strip()
+        return value
+
     @field_validator("gemini_api_key", "groq_api_key", "openrouter_api_key", mode="after")
     @classmethod
     def _mask_llm_keys(cls, value: SecretStr | None) -> SecretStr | None:

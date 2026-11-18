@@ -114,3 +114,50 @@ def test_the_dashboard_flags_models_without_keys_and_free_written_posts(tmp_path
     warnings = [warning.value for warning in app.warning]
     assert any("ANTHROPIC_API_KEY is not set: live runs replace" in text and "free LLM chain" in text for text in warnings)
     st.cache_resource.clear()
+
+
+def _rejecting_client(calls: list[str]):
+    """An Anthropic client whose every call fails like a wrong ANTHROPIC_API_KEY (no network)."""
+    import anthropic
+    import httpx
+
+    def create(**request):
+        calls.append(request["model"])
+        response = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+        raise anthropic.AuthenticationError(
+            "Error code: 401", response=response,
+            body={"type": "error", "error": {"type": "authentication_error", "message": "Invalid bearer token"}})
+
+    messages = type("Messages", (), {"create": staticmethod(create)})()
+    return type("Client", (), {"messages": messages, "beta": type("Beta", (), {"messages": messages})()})()
+
+
+def test_a_rejected_model_key_falls_back_to_the_free_chain_and_says_to_check_the_key(claude_route, free_reply,
+                                                                                      monkeypatch):
+    from pydantic import SecretStr
+
+    from plugins.generators.llm_text_gen import LLMTextGenerator
+
+    calls: list[str] = []
+    monkeypatch.setattr(claude_route.settings, "anthropic_api_key", SecretStr("sk-ant-api03-revoked"))
+    monkeypatch.setattr(LLMTextGenerator, "_client", lambda self, api_key: _rejecting_client(calls))
+    report = claude_route.orchestrator.run("sports", "he", ["console_post"], mode="queued", limit=2)
+
+    assert report.ok and report.count("queued") == 2 and report.count("failed") == 0
+    assert calls == ["claude-sonnet-5-5"]  # asked once: the second product goes straight to the free chain
+    assert {row["model_used"] for row in claude_route.db.list_publications()} == {
+        "groq:llama-3.3-70b-versatile [free fallback for claude-sonnet-5-5]"}
+    assert len(report.warnings) == 1
+    assert "ANTHROPIC_API_KEY was rejected (Anthropic: HTTP 401, Invalid bearer token)" in report.warnings[0]
+    assert "without quotes or spaces" in report.warnings[0]
+
+
+@pytest.mark.parametrize("raw", ['  sk-ant-api03-abc\n', '"sk-ant-api03-abc"', "'sk-ant-api03-abc' "])
+def test_llm_keys_are_read_without_spaces_or_wrapping_quotes(monkeypatch, raw):
+    from core.config import Settings
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", raw)
+    monkeypatch.setenv("GROQ_API_KEY", raw)
+    settings = Settings()
+    assert settings.anthropic_api_key.get_secret_value() == "sk-ant-api03-abc"
+    assert settings.groq_api_key.get_secret_value() == "sk-ant-api03-abc"

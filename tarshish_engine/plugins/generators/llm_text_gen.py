@@ -46,6 +46,11 @@ _PROVIDER_ALIASES = {
     "mock": "mock", "offline": "mock", "template": "mock", "none": "mock",
 }
 _API_KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
+_AUTH_STATUSES = (401, 403)  # the provider refused the key itself (invalid, revoked, no access)
+
+
+class KeyRejectedError(NonRetryableError):
+    """The provider rejected the API key: every request with it would fail the same way."""
 FREE_KEY_ENVS = ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY")
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +163,12 @@ def resolve_model(spec: str | None, get_env: Any) -> tuple[str, str]:
             else get_env("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
         )
     return provider, model
+
+
+def _auth_reason(body: Any, default: str) -> str:
+    """The provider's own words from an error body (``{"error": {"message": …}}``), else ``default``."""
+    error = body.get("error") if isinstance(body, dict) else None
+    return str(error.get("message") or default) if isinstance(error, dict) else default
 
 
 def key_fallback_notice(llm_model: str | None, settings: Any) -> str | None:
@@ -378,6 +389,7 @@ class LLMTextGenerator(BaseGenerator):
         self._clients: dict[str, Any] = {}
         self._warned: set[str] = set()
         self._chain: Any = None
+        self._key_rejected: str | None = None  # why the provider refused the key; later products skip the call
 
     @property
     def generator_name(self) -> str:
@@ -401,6 +413,8 @@ class LLMTextGenerator(BaseGenerator):
         api_key = self._api_key()
         if not api_key:
             return self._free_fallback(product, language, prompt_template, f"{_API_KEY_ENV[self._provider]} is not set")
+        if self._key_rejected:
+            return self._free_fallback(product, language, prompt_template, self._key_rejected)
 
         # Guardrail: never start a paid request once the monthly cap is reached.
         if self.context.budget_guard is not None:
@@ -416,10 +430,15 @@ class LLMTextGenerator(BaseGenerator):
             product, language, prompt_template, tone=self.context.options.get("tone"),
             default_template=self.default_prompt_template,
         )
-        if self._provider == "anthropic":
-            reply = self._call_anthropic(client, user_prompt)
-        else:
-            reply = self._call_gemini(client, user_prompt)
+        try:
+            if self._provider == "anthropic":
+                reply = self._call_anthropic(client, user_prompt)
+            else:
+                reply = self._call_gemini(client, user_prompt)
+        except KeyRejectedError as exc:
+            self._key_rejected = (f"{_API_KEY_ENV[self._provider]} was rejected ({exc}); check that it is a valid, "
+                                  "active key, pasted without quotes or spaces")
+            return self._free_fallback(product, language, prompt_template, self._key_rejected)
 
         parsed = parse_caption_json(reply.text)
         fallback_caption, fallback_tags = self.offline_write(product, language)
@@ -499,6 +518,8 @@ class LLMTextGenerator(BaseGenerator):
         except anthropic.APIStatusError as exc:
             if exc.status_code >= 500 or exc.status_code in (408, 409):
                 raise  # retryable
+            if exc.status_code in _AUTH_STATUSES:
+                raise KeyRejectedError(f"Anthropic: HTTP {exc.status_code}, {_auth_reason(exc.body, exc.message)}") from exc
             raise NonRetryableError(f"Anthropic rejected the request (HTTP {exc.status_code}): {exc.message}") from exc
 
         usage = response.usage
@@ -546,6 +567,8 @@ class LLMTextGenerator(BaseGenerator):
         except genai_errors.ClientError as exc:  # 4xx
             if exc.code in (408, 429):
                 raise  # retryable
+            if exc.code in _AUTH_STATUSES or "API_KEY_INVALID" in str(exc):  # Gemini answers 400 for a bad key
+                raise KeyRejectedError(f"Gemini: HTTP {exc.code}, {exc.message}") from exc
             raise NonRetryableError(f"Gemini rejected the request (HTTP {exc.code}): {exc.message}") from exc
         # ServerError (5xx) and transport errors propagate and are retried.
 

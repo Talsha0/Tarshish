@@ -146,11 +146,16 @@ def test_claude_rate_limit_is_retried_and_bad_request_degrades(llm_server, paid_
     assert "output_config" not in retried_body and "fallbacks" not in retried_body  # minimal request
 
 
-def test_claude_auth_failure_is_not_retried(llm_server, paid_settings, product):
-    llm_server.script.append(api_error(401, "authentication_error", "invalid x-api-key"))
-    with pytest.raises(NonRetryableError, match="HTTP 401"):
-        generator(paid_settings, "claude-haiku-5-5").generate(product, "he", None)
-    assert len(llm_server.requests) == 1
+def test_claude_auth_failure_is_not_retried_and_falls_back(llm_server, paid_settings, product):
+    llm_server.script.append(api_error(401, "authentication_error", "Invalid bearer token"))
+    writer = generator(paid_settings, "claude-haiku-5-5")
+    first = writer.generate(product, "he", None)
+    second = writer.generate(product, "he", None)
+
+    assert len(llm_server.requests) == 1  # neither retried nor asked again for the next product
+    assert first.model_used == second.model_used == "offline-template"  # no free key in the tests
+    assert writer.notices and "ANTHROPIC_API_KEY was rejected (Anthropic: HTTP 401, Invalid bearer token)" \
+        in writer.notices[0]
 
 
 def test_claude_refusal_is_read_from_stop_reason(llm_server, paid_settings, product):

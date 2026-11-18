@@ -345,6 +345,11 @@ the run report warns about it (dashboard run result, CLI `!` lines). `model_used
 free key either, or no free model left with quota, the offline templates write it (also with a warning). The
 Content Types tab and dry-runs warn ahead of time which models will be replaced.
 
+**Key rejected?** A key the provider refuses (HTTP 401/403, e.g. Anthropic's `Invalid bearer token`: a wrong,
+revoked or mistyped key) is handled the same way: the first product's call fails, the rest of the run goes
+straight to the free chain, and the warning says the key was rejected. Keys are read without surrounding spaces,
+newlines or wrapping quotes, so a value pasted as `"sk-ant-…"` in a secrets box still works.
+
 Cheaper Claude options: `claude-sonnet-5-5`, `claude-haiku-5-5`. For models that support it the
 Anthropic request enables server-side refusal fallback (`fallbacks: "default"`) and runs at
 `effort: low` (`ANTHROPIC_EFFORT`). Prices live in `MODEL_PRICING` in
