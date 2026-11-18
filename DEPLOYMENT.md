@@ -49,10 +49,12 @@ Do the steps in order: each one needs a value from the step before.
    `tarshish_engine/core/schema_postgres.sql` into **SQL Editor** and run it.) Row Level Security is
    switched on for every table, so Supabase's public REST API — reachable with the anon key — sees no
    data; only connections with `DATABASE_URL` can read or write.
-5. **Only if you publish videos or Stories** (`VIDEO_RENDER_ENABLED=true`, or the `instagram_story`
-   content type with generated media): **Storage** → **New bucket** → name `media`, **Public bucket** on.
-   Then note the project URL (`https://<project-ref>.supabase.co`) and the `service_role` / secret key
-   (**Project Settings → API Keys**) for step 5. Plain image posts use the stores' own photo URLs and
+5. **Only if you publish videos, Stories or FindHub branded images** (`VIDEO_RENDER_ENABLED=true`, the
+   `instagram_story` content type with generated media, or posts approved in the dashboard's Content Review):
+   **Storage** → **New bucket** → name `media`, **Public bucket** on. Then note the `service_role` / secret
+   key (**Project Settings → API Keys**): it becomes `SUPABASE_SERVICE_ROLE_KEY`, with `STORAGE_MODE=supabase`.
+   The project URL is read from `DATABASE_URL` (the `postgres.<project-ref>` user name), so `SUPABASE_URL` is
+   only needed when the database is not on Supabase. Plain image posts use the stores' own photo URLs and
    need no bucket.
 
 ### Already have local data?
@@ -169,6 +171,10 @@ deployment refuses them and says why.
    INSTAGRAM_ACCESS_TOKEN = "…"
    INSTAGRAM_BUSINESS_ACCOUNT_ID = "…"
    MAX_MONTHLY_AI_BUDGET_USD = "5.0"
+
+   # Only with the media bucket (step 1.5) — the project URL comes from DATABASE_URL:
+   # STORAGE_MODE = "supabase"
+   # SUPABASE_SERVICE_ROLE_KEY = "…"
    ```
 
 4. Deploy. Dependencies come from `tarshish_engine/dashboard/requirements.txt`, and
@@ -209,7 +215,7 @@ variable (e.g. `INSTAGRAM_ACCESS_TOKEN_SPORTS_EN`) only needs a new secret here.
 | `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID`, `…_GADGETS_EN`, `TG_*` … | per account | the names in the Social Accounts matrix |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` (+ `…_GADGETS_EN`) | for YouTube Shorts | OAuth refresh token per channel, `youtube.upload` scope |
 | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN_*`, `TIKTOK_REFRESH_TOKEN_*` | for TikTok | the refresh token keeps the 24-hour access token fresh on scheduled runs |
-| `STORAGE_MODE=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | for videos / Stories | step 1.5 |
+| `STORAGE_MODE=supabase`, `SUPABASE_SERVICE_ROLE_KEY` | for videos / Stories / branded images | step 1.5; `SUPABASE_URL` is read from `DATABASE_URL` unless set |
 | `VIDEO_RENDER_ENABLED=true` | for rendered videos | the workflow then installs ffmpeg |
 | `MAX_MONTHLY_AI_BUDGET_USD`, `PUBLISHING_MODE`, `PUBLISH_BATCH_LIMIT`, `HARVEST_LIMIT`, `WORKER_*` | no | defaults as in `.env.example` |
 

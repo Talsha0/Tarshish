@@ -6,7 +6,8 @@ Storage, through its REST API, so no extra SDK is needed.
 
 Settings (environment variables, read with ``Settings.get_env``):
 
-    SUPABASE_URL                 https://<project-ref>.supabase.co
+    SUPABASE_URL                 https://<project-ref>.supabase.co — optional: without it the project is read
+                                 from DATABASE_URL (pooler user ``postgres.<ref>`` or host ``db.<ref>.supabase.co``)
     SUPABASE_SERVICE_ROLE_KEY    the project's service_role key or new-style secret key (sb_secret_…);
                                  SUPABASE_SECRET_KEY is accepted as well. Never ship it to a browser.
     SUPABASE_STORAGE_BUCKET      bucket name (default: media). Create it once as a PUBLIC bucket:
@@ -19,10 +20,11 @@ the ones unpublished content still points at.
 from __future__ import annotations
 
 import mimetypes
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -33,6 +35,35 @@ from core.resilience import ConfigError, get_logger, register_secret
 logger = get_logger("storage.supabase")
 
 DEFAULT_BUCKET = "media"
+_PROJECT_REF = re.compile(r"[a-z0-9]{8,40}")
+
+
+def supabase_url_from_database_url(database_url: str | None) -> str | None:
+    """``https://<project-ref>.supabase.co`` for a Supabase connection string, else ``None``.
+
+    Pooler strings carry the project in the user name (``postgres.<ref>@…pooler.supabase.com``),
+    direct ones in the host (``db.<ref>.supabase.co``).
+    """
+    try:
+        parts = urlsplit((database_url or "").strip())
+        host, user = (parts.hostname or "").lower(), unquote(parts.username or "").lower()
+    except ValueError:
+        return None
+    ref = None
+    if host.endswith(".pooler.supabase.com") and "." in user:
+        ref = user.rpartition(".")[2]
+    elif host.startswith("db.") and host.endswith(".supabase.co"):
+        ref = host.removeprefix("db.").removesuffix(".supabase.co")
+    return f"https://{ref}.supabase.co" if ref and _PROJECT_REF.fullmatch(ref) else None
+
+
+def resolve_supabase_url(settings: Settings) -> str | None:
+    """``SUPABASE_URL`` when set, else the project of ``DATABASE_URL``."""
+    explicit = (settings.get_env("SUPABASE_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    database_url = settings.database_url.get_secret_value() if settings.database_url is not None else None
+    return supabase_url_from_database_url(database_url)
 _LIST_PAGE = 1000
 
 
@@ -41,13 +72,14 @@ class SupabaseStorage(BaseStorage):
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         super().__init__(settings)
-        base = (settings.get_env("SUPABASE_URL") or "").rstrip("/")
+        base = resolve_supabase_url(settings) or ""
         key = settings.get_env("SUPABASE_SERVICE_ROLE_KEY") or settings.get_env("SUPABASE_SECRET_KEY")
-        if not base.startswith("https://") or not key:
-            raise ConfigError(
-                "STORAGE_MODE=supabase needs SUPABASE_URL (https://<project-ref>.supabase.co) and "
-                "SUPABASE_SERVICE_ROLE_KEY (Project Settings > API keys)."
-            )
+        if not key:
+            raise ConfigError("STORAGE_MODE=supabase needs SUPABASE_SERVICE_ROLE_KEY (Supabase > Project Settings > "
+                              "API keys: the service_role or secret key).")
+        if not base.startswith("https://"):
+            raise ConfigError("STORAGE_MODE=supabase needs the project URL: set SUPABASE_URL "
+                              "(https://<project-ref>.supabase.co), or a Supabase DATABASE_URL to read it from.")
         register_secret(key)
         self.bucket = settings.get_env("SUPABASE_STORAGE_BUCKET", DEFAULT_BUCKET) or DEFAULT_BUCKET
         self.api = f"{base}/storage/v1"

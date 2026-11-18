@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from core.resilience import ConfigError, redact
 from storage.supabase_storage import SupabaseStorage
@@ -74,8 +75,46 @@ def test_cleanup_removes_only_expired_unprotected_files(make_settings, storage_e
 def test_missing_settings_are_a_config_error(make_settings, monkeypatch):
     for name in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"):
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(ConfigError, match="SUPABASE_URL"):
+    with pytest.raises(ConfigError, match="SUPABASE_SERVICE_ROLE_KEY"):
         SupabaseStorage(make_settings())
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", KEY)
+    with pytest.raises(ConfigError, match="SUPABASE_URL"):  # and no Supabase DATABASE_URL to read the project from
+        SupabaseStorage(make_settings(database_url=None))
+
+
+POOLER = "postgresql://postgres.abcdefghijklmnopqrst:p%40ss@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+
+
+@pytest.mark.parametrize(("database_url", "expected"), [
+    (POOLER + "?sslmode=require", "https://abcdefghijklmnopqrst.supabase.co"),
+    ("postgresql://postgres:pw@db.abcdefghijklmnopqrst.supabase.co:5432/postgres", "https://abcdefghijklmnopqrst.supabase.co"),
+    ("postgresql://user:pw@localhost:5432/tarshish", None),       # not Supabase
+    ("postgresql://postgres:pw@aws-0-eu.pooler.supabase.com:6543/postgres", None),  # pooler user without a ref
+    (None, None),
+])
+def test_the_project_url_is_read_from_a_supabase_database_url(database_url, expected):
+    from storage.supabase_storage import supabase_url_from_database_url
+
+    assert supabase_url_from_database_url(database_url) == expected
+
+
+def test_without_supabase_url_the_bucket_is_on_the_database_s_project(make_settings, monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", KEY)
+    seen: list[httpx.Request] = []
+    settings = make_settings().model_copy(update={"database_url": SecretStr(POOLER)})
+    storage = SupabaseStorage(settings, client=fake_api({}, seen))
+    image = tmp_path / "post.png"
+    image.write_bytes(b"png")
+
+    url = storage.save(str(image), "gadgets_he/instagram_post/post.png")
+    assert url == "https://abcdefghijklmnopqrst.supabase.co/storage/v1/object/public/media/gadgets_he/instagram_post/post.png"
+    assert seen[-1].url.host == "abcdefghijklmnopqrst.supabase.co"
+
+
+def test_an_explicit_supabase_url_wins_over_the_database_url(make_settings, storage_env):
+    settings = make_settings().model_copy(update={"database_url": SecretStr(POOLER)})
+    assert SupabaseStorage(settings, client=fake_api({}, [])).public_prefix.startswith(BASE + "/")
 
 
 def test_the_engine_selects_it_with_storage_mode(make_settings, storage_env):

@@ -130,7 +130,7 @@ CORE_ENV_VARS: dict[str, list[tuple[str, str]]] = {
     "Affiliate tracking": [("TEMU_TRACKING_ID", "Temu affiliate links"),
                            ("ALIEXPRESS_TRACKING_ID", "AliExpress affiliate links")],
     "Infrastructure": [("DATABASE_URL", "Supabase PostgreSQL (else local SQLite)"),
-                       ("SUPABASE_URL", "Media bucket for videos / Stories"),
+                       ("SUPABASE_SERVICE_ROLE_KEY", "Media bucket for videos / Stories (project read from DATABASE_URL)"),
                        (ADMIN_SECRET_ENV, "This admin API")],
 }
 
